@@ -21,9 +21,9 @@ console.log = function(...args) {
 const CONFIG = {
   
   apiKeys: [
-    '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', 
-    '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',
-    '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'
+    process.env.GROQ_KEY_1, 
+    process.env.GROQ_KEY_2,
+    process.env.GROQ_KEY_3
   ],
 
   models: {
