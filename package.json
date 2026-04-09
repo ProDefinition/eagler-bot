@@ -1,0 +1,18 @@
+{
+  "name": "habibi",
+  "version": "1.0.0",
+  "description": "Minecraft helper bot with web dashboard",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "groq-sdk": "^0.5.0",
+    "minecraft-data": "^3.109.0",
+    "mineflayer": "^4.37.0",
+    "mineflayer-collectblock": "^1.6.0",
+    "mineflayer-pathfinder": "^2.4.5",
+    "socket.io": "^4.7.2"
+  }
+}
