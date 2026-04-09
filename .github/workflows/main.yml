@@ -1,0 +1,29 @@
+name: Habibi Bot 24/7
+on:
+  schedule:
+    - cron: '0 */4 * * *' # Restarts every 4 hours to bypass time limits
+  workflow_dispatch:      # Allows you to start it manually
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Deps
+        run: npm install
+
+      - name: Run Bot
+        run: node bot.js
+        env:
+          # This maps your GitHub Secrets to the script
+          GROQ_KEY_1: ${{ secrets.GROQ_KEY_1 }}
+          GROQ_KEY_2: ${{ secrets.GROQ_KEY_2 }}
+          GROQ_KEY_3: ${{ secrets.GROQ_KEY_3 }}
+          MC_PASSWORD: ${{ secrets.MC_PASS }}
