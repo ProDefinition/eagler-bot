@@ -7,28 +7,31 @@ const readline = require('readline');
 // ========================
 // SUPPRESS CHUNK WARNINGS
 // ========================
-const originalConsoleLog = console.log;
-console.log = function(...args) {
-    if (args.length && typeof args[0] === 'string' && args[0].includes('Ignoring block entities as chunk failed to load')) {
-        return;
-    }
-    originalConsoleLog.apply(console, args);
-};
+// Catch log, warn, and error to ensure the chunk spam is completely muted.
+['log', 'warn', 'error'].forEach((method) => {
+    const original = console[method];
+    console[method] = function(...args) {
+        if (args.length && typeof args[0] === 'string' && args[0].includes('Ignoring block entities as chunk failed to load')) {
+            return;
+        }
+        original.apply(console, args);
+    };
+});
 
 // ========================
 // CONFIGURATION
 // ========================
 const CONFIG = {
-  
   apiKeys: [
-    process.env.GROQ_KEY_1, 
-    process.env.GROQ_KEY_2,
-    process.env.GROQ_KEY_3
+    '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', 
+    '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',
+    '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'
   ],
 
   models: {
-    chat: ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b'],
-    moderation: ['llama-3.1-8b-instant', 'openai/gpt-oss-safeguard-20b']
+    // Note: Removed the invalid "openai/gpt-oss" models as Groq will reject them and trigger errors.
+    chat: ['llama-3.3-70b-versatile', 'mixtral-8x7b-32768'],
+    moderation: ['llama-3.1-8b-instant', 'gemma2-9b-it']
   },
 
   server: {
@@ -38,7 +41,7 @@ const CONFIG = {
     version: '1.12.2',
   },
   moderation: {
-    mute_duration: 5,                 
+    mute_duration: 5,                  
     moderators: ['ChewKok', 'eagly20', 'n2ab', 'Chew'], 
   },
   chat: {
@@ -69,6 +72,28 @@ function switchApiKey() {
 }
 
 // ========================
+// API KEY TESTER
+// ========================
+async function testAllApiKeys() {
+    console.log('\n[API] === Testing All API Keys ===');
+    for (let i = 0; i < CONFIG.apiKeys.length; i++) {
+        const key = CONFIG.apiKeys[i];
+        const testClient = new Groq({ apiKey: key });
+        try {
+            await testClient.chat.completions.create({
+                model: 'llama-3.1-8b-instant',
+                messages: [{ role: 'user', content: 'Say "test"' }],
+                max_tokens: 5
+            });
+            console.log(`[API] Key #${i + 1} (${key.slice(0, 10)}...): ✅ VALID`);
+        } catch (err) {
+            console.log(`[API] Key #${i + 1} (${key.slice(0, 10)}...): ❌ FAILED - ${err.message}`);
+        }
+    }
+    console.log('[API] ============================\n');
+}
+
+// ========================
 // UTILITIES
 // ========================
 function say(text) {
@@ -92,15 +117,16 @@ function say(text) {
   }
 }
 
-// Dynamically fetch all online players so the AI knows real usernames
 function getOnlineUsernames() {
   if (!bot || !bot.players) return 'None';
   return Object.keys(bot.players).join(', ');
 }
 
-// 🛑 Updated callGroq: INFINITE RETRY LOOP (No Fallbacks)
+// 🛑 Updated callGroq: Safety limit prevents infinite freezing
 async function callGroq(messages, maxTokens = 100, temperature = 0.7, modelList = CONFIG.models.chat) {
-  while (true) { 
+  let keysTried = 0;
+
+  while (keysTried < CONFIG.apiKeys.length) { 
     for (const model of modelList) {
       try {
         const response = await groq.chat.completions.create({
@@ -115,15 +141,18 @@ async function callGroq(messages, maxTokens = 100, temperature = 0.7, modelList 
         
       } catch (err) {
         console.error(`[API] Error (${model}): ${err.message}`);
-        console.log(`[API] Model ${model} failed. Trying next model...`);
         continue; 
       }
     }
 
     console.log(`[API] ⚠️ All models failed on Key #${currentKeyIndex + 1}. Rotating to next key...`);
     switchApiKey();
+    keysTried++;
     await new Promise(resolve => setTimeout(resolve, 1000));
   }
+  
+  console.error('[API] ❌ All API keys failed or exhausted for this request.');
+  return null; // Return null instead of hanging infinitely
 }
 
 function addMemory(player, message) {
@@ -167,6 +196,8 @@ Normalized: "${normalized}"`;
     CONFIG.models.moderation
   );
 
+  if (!result) return { isProfane: false, reason: 'Error checking API' };
+
   console.log(`[Profanity] Raw response: "${result}"`);
 
   const cleanResult = result.trim();
@@ -184,7 +215,6 @@ Normalized: "${normalized}"`;
 function mute(player, reason = 'Rule violation') {
   const duration = CONFIG.moderation.mute_duration;
   
-  // Execute the server command. We no longer use say() here to prevent double broadcasts in chat.
   bot.chat(`/tempmute ${player} ${duration}m ${reason.slice(0, 40)}`);
   
   muteList.add(player);
@@ -216,7 +246,6 @@ async function checkViolation(sender, message) {
     }
   }
 
-  // Use the AI's dynamically generated reason
   const aiCheck = await checkProfanity(message);
   if (aiCheck.isProfane) {
     console.log(`[MOD] AI flagged profanity: ${sender} for ${aiCheck.reason}`);
@@ -250,7 +279,9 @@ If you notice the user's message contains severe profanity that might have been 
     CONFIG.models.chat
   );
 
-  if (response && response.startsWith('[ALERT]')) {
+  if (!response) return "I'm currently having a brain freeze, try again in a second!";
+
+  if (response.startsWith('[ALERT]')) {
     console.log(`[Alert] Conversational model flagged missed profanity from ${sender}`);
     const secondCheck = await checkProfanity(message);
     if (secondCheck.isProfane) {
@@ -280,7 +311,7 @@ function handleBangCommand(sender, msg) {
       say(`Health: ${Math.round(bot.health)}/${bot.maxHealth}, Food: ${bot.food}/20`);
       break;
     case 'help':
-      say('Commands: !inventory, !status, !joke, !roll, !fact, !mute <player> [reason], !kick <player> [reason]');
+      say('Commands: !inventory, !status, !joke, !roll, !fact, !testkeys, !mute <player> [reason], !kick <player> [reason]');
       break;
     case 'joke':
       getAIResponse('Tell me a short, clean joke about Minecraft.', sender).then(r => r && say(r));
@@ -292,6 +323,14 @@ function handleBangCommand(sender, msg) {
       break;
     case 'fact':
       getAIResponse('Tell me an interesting Minecraft fact.', sender).then(r => r && say(r));
+      break;
+    case 'testkeys':
+      if (sender !== 'Terminal' && !CONFIG.moderation.moderators.includes(sender)) { 
+        say('Permission denied.'); 
+        return; 
+      }
+      say('Testing API keys... Check terminal for results.');
+      testAllApiKeys();
       break;
     case 'mute':
       if (!CONFIG.moderation.moderators.includes(sender)) { say('Permission denied.'); return; }
@@ -356,6 +395,10 @@ function createBot() {
     if (!text || text.length > 500) return;
 
     const lower = text.toLowerCase();
+    
+    // Check if it's our previously ignored block entity spam just in case 
+    if (lower.includes('ignoring block entities')) return;
+
     console.log(`[Server] ${text}`);
 
     if (!isLoggedIn && lower.includes('/login')) {
@@ -410,10 +453,8 @@ function createBot() {
 
     if (!sender || !message || sender === 'Habibi') return;
     
-    // Additional filter for numeric/time messages that might slip through
     if (message.length < 2 || message.match(/^\d+\s+seconds$/i)) return;
 
-    // Clear player from internal mute list if they bypass/get unmuted and chat
     if (muteList.has(sender)) {
       muteList.delete(sender);
       console.log(`[MOD] ${sender} spoke in chat. Cleared from internal mute list.`);
@@ -424,7 +465,7 @@ function createBot() {
 
     if (isInGame) {
       const violated = await checkViolation(sender, message);
-      if (violated) return; // If violated, don't let the conversational AI respond.
+      if (violated) return;
     }
 
     const mentioned = message.toLowerCase().includes('habibi');
