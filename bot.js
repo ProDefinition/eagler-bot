@@ -16,11 +16,9 @@ const readline = require('readline');
 });
 
 const CONFIG = {
-  // 1 API Key for Chat
   apiKeysChat: [
     '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' 
   ],
-  // 2 API Keys for Moderation
   apiKeysMod: [
     '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',
     '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'
@@ -28,7 +26,6 @@ const CONFIG = {
 
   models: {
     chat: ['llama-3.1-8b-instant', 'llama-3.3-70b-versatile'],
-    // openai/gpt-oss-20b is the fastest model on the list at 1000 T/s
     moderation: ['openai/gpt-oss-20b'] 
   },
 
@@ -50,7 +47,7 @@ const CONFIG = {
 };
 
 // ========================
-// STATE & GROQ CLIENTS
+// STATE & MEMORY
 // ========================
 let bot = null;
 let isInGame = false;
@@ -59,21 +56,58 @@ let lastChatTime = 0;
 const playerMemory = new Map();
 const muteList = new Set();
 
-// Setup initial Groq clients for both Chat and Moderation
-let currentChatKeyIndex = 0;
-let currentModKeyIndex = 0;
-let groqChat = new Groq({ apiKey: CONFIG.apiKeysChat[currentChatKeyIndex] });
-let groqMod = new Groq({ apiKey: CONFIG.apiKeysMod[currentModKeyIndex] });
+// ========================
+// BACKGROUND RATE-LIMIT MANAGER
+// ========================
+const keyPool = {
+  chat: CONFIG.apiKeysChat.map((k, i) => ({ id: i + 1, key: k, status: 'active', cooldownUntil: 0 })),
+  mod: CONFIG.apiKeysMod.map((k, i) => ({ id: i + 1, key: k, status: 'active', cooldownUntil: 0 }))
+};
 
-function switchApiKey(type) {
-  if (type === 'chat') {
-    currentChatKeyIndex = (currentChatKeyIndex + 1) % CONFIG.apiKeysChat.length;
-    console.log(`[API] 🔄 Switching to Chat API Key #${currentChatKeyIndex + 1}...`);
-    groqChat = new Groq({ apiKey: CONFIG.apiKeysChat[currentChatKeyIndex] });
-  } else if (type === 'mod') {
-    currentModKeyIndex = (currentModKeyIndex + 1) % CONFIG.apiKeysMod.length;
-    console.log(`[API] 🔄 Switching to Mod API Key #${currentModKeyIndex + 1}...`);
-    groqMod = new Groq({ apiKey: CONFIG.apiKeysMod[currentModKeyIndex] });
+function getAvailableKey(type) {
+  const pool = keyPool[type];
+  const now = Date.now();
+  
+  // Background revival check
+  pool.forEach(k => {
+    if (k.status === 'cooldown' && now > k.cooldownUntil) {
+      k.status = 'active';
+      const msg = `[API Debug] ${type.toUpperCase()} Key #${k.id} finished cooldown. Back in action!`;
+      console.log(msg);
+      say(msg);
+    }
+  });
+
+  return pool.find(k => k.status === 'active');
+}
+
+function handleKeyFailure(type, keyId, errorMsg) {
+  const pool = keyPool[type];
+  const keyObj = pool.find(k => k.id === keyId);
+  if (!keyObj) return;
+
+  const cleanErr = errorMsg.replace(/[\n\r]/g, ' ').substring(0, 50);
+  const isRateLimit = cleanErr.includes('429') || cleanErr.toLowerCase().includes('rate limit');
+  const isAuthError = cleanErr.includes('401') || cleanErr.toLowerCase().includes('unauthorized');
+  
+  if (isRateLimit) {
+    keyObj.status = 'cooldown';
+    keyObj.cooldownUntil = Date.now() + 60000; // 60-second timeout
+    const msg = `[API Debug] ${type.toUpperCase()} Key #${keyId} hit a 429 Rate Limit. Sleeping for 60s.`;
+    console.log(msg);
+    say(msg);
+  } else if (isAuthError) {
+    keyObj.status = 'dead';
+    const msg = `[API Debug] ${type.toUpperCase()} Key #${keyId} threw a 401. Key is dead or invalid.`;
+    console.log(msg);
+    say(msg);
+  } else {
+    // Generic server issue, treat as temporary cooldown
+    keyObj.status = 'cooldown';
+    keyObj.cooldownUntil = Date.now() + 15000; // 15-second timeout
+    const msg = `[API Debug] ${type.toUpperCase()} Key #${keyId} failed: ${cleanErr}. Sleeping 15s.`;
+    console.log(msg);
+    say(msg);
   }
 }
 
@@ -129,19 +163,39 @@ function getOnlineUsernames() {
   return Object.keys(bot.players).join(', ');
 }
 
+function addMemory(player, message) {
+  if (!playerMemory.has(player)) playerMemory.set(player, []);
+  const arr = playerMemory.get(player);
+  arr.push(message);
+  if (arr.length > 10) arr.shift();
+}
+
+function getMemory(player) {
+  return (playerMemory.get(player) || []).join('\n');
+}
+
 // ========================
 // GROQ API CALLER
 // ========================
 async function callGroq(messages, maxTokens = 100, temperature = 0.7, modelList = CONFIG.models.chat, type = 'chat') {
-  const apiKeys = type === 'mod' ? CONFIG.apiKeysMod : CONFIG.apiKeysChat;
-  let keysTried = 0;
+  let attempts = 0;
+  const maxAttempts = keyPool[type].length;
 
-  while (keysTried < apiKeys.length) { 
-    let currentClient = type === 'mod' ? groqMod : groqChat;
+  while (attempts < maxAttempts) { 
+    const activeKeyObj = getAvailableKey(type);
+    
+    if (!activeKeyObj) {
+      const msg = `[API Fatal] No active ${type.toUpperCase()} keys available! All dead or on cooldown.`;
+      console.error(msg);
+      say(msg);
+      return null;
+    }
+
+    const client = new Groq({ apiKey: activeKeyObj.key });
 
     for (const model of modelList) {
       try {
-        const response = await currentClient.chat.completions.create({
+        const response = await client.chat.completions.create({
           model: model,
           messages: messages,
           max_tokens: maxTokens,
@@ -152,39 +206,22 @@ async function callGroq(messages, maxTokens = 100, temperature = 0.7, modelList 
         if (content) return content; 
         
       } catch (err) {
-        console.error(`[API] Error (${model} on ${type.toUpperCase()} client): ${err.message}`);
-        
-        if (type === 'chat') {
-          let cleanErr = err.message.replace(/[\n\r]/g, ' ').substring(0, 60);
-          say(`[API Error] Model ${model} failed: ${cleanErr}...`);
+        // If the error is network/auth related, kill/cooldown the key and break the model loop
+        if (err.message.includes('429') || err.message.includes('401') || err.message.toLowerCase().includes('rate') || err.message.toLowerCase().includes('unauthorized')) {
+            handleKeyFailure(type, activeKeyObj.id, err.message);
+            break; 
+        } else {
+            // If it's just a model failure (e.g. model offline), log it and try the next model on the same key
+            console.error(`[API] Error (${model} on ${type.toUpperCase()} Key #${activeKeyObj.id}): ${err.message}`);
         }
-        
-        continue; 
       }
     }
 
-    console.log(`[API] ⚠️ All models failed on ${type.toUpperCase()} Key #${(type === 'mod' ? currentModKeyIndex : currentChatKeyIndex) + 1}. Rotating to next key...`);
-    if (type === 'chat') say(`[API Warning] Rotating to next API key...`);
-    
-    switchApiKey(type);
-    keysTried++;
+    attempts++;
     await new Promise(resolve => setTimeout(resolve, 1000));
   }
   
-  console.error(`[API] ❌ All ${type.toUpperCase()} API keys failed or exhausted for this request.`);
-  if (type === 'chat') say('[API Fatal] All keys exhausted or rate-limited.');
   return null; 
-}
-
-function addMemory(player, message) {
-  if (!playerMemory.has(player)) playerMemory.set(player, []);
-  const arr = playerMemory.get(player);
-  arr.push(message);
-  if (arr.length > 10) arr.shift();
-}
-
-function getMemory(player) {
-  return (playerMemory.get(player) || []).join('\n');
 }
 
 // ========================
@@ -225,7 +262,6 @@ Message: "${message}"`;
 function mute(player, reason = 'Rule violation') {
   const duration = CONFIG.moderation.mute_duration;
   
-  // CRITICAL FIX: Strip colons so the bot doesn't parse its own reason as a chat message
   let safeReason = reason.replace(/[:\n\r]/g, ' ').substring(0, 100);
   
   bot.chat(`/tempmute ${player} ${duration}m ${safeReason}`);
@@ -281,7 +317,7 @@ async function checkViolation(sender, message) {
 async function getAIResponse(message, sender) {
   const memory = getMemory(sender);
   
-const system = `You are Habibi, a highly professional, articulate, and remarkably human presence on this Minecraft server. You are absolutely NOT a bot, an AI, or an automated script.
+  const system = `You are Habibi, a highly professional, articulate, and remarkably human presence on this Minecraft server. You are absolutely NOT a bot, an AI, or an automated script.
 
 COMMUNICATION STYLE:
 - NEVER WRITE PARAGRAPHS. You must keep your responses to EXACTLY 1 or 2 short sentences. MAXIMUM 15 WORDS TOTAL.
@@ -449,7 +485,6 @@ function createBot() {
       return;
     }
 
-    // CRITICAL FIX: Aggressive server message filtering to completely ignore moderation logs
     const isServerMessage = /^\[(Server|INFO|WARN|ERROR|System)\]/i.test(text) ||
                             /^\*{3}/.test(text) ||
                             /^\[[+\-]\]/.test(text) ||
@@ -483,7 +518,6 @@ function createBot() {
       }
     }
 
-    // CRITICAL FIX: Hardcode 'detected' into the ignore list
     if (!sender || !message || sender === 'Habibi' || sender === 'detected') return;
     
     if (message.length < 2 || message.match(/^\d+\s+seconds$/i)) return;
