@@ -36,11 +36,12 @@ const CONFIG = {
 let bot = null;
 let isInGame = false;
 let isLoggedIn = false;
-let isReady = false; // <-- NEW: Prevents AI from firing before system checks pass
+let isReady = false; 
 
-// Agent's short-term memory to understand context
+// Agent's memory
 const chatHistory = [];
 const MAX_HISTORY = 15; 
+const warnedPlayers = new Set(); // <-- NEW: Tracks who has already been warned
 
 // ========================
 // GROQ MODERATION QUEUE
@@ -78,7 +79,6 @@ async function processModQueue() {
 
   while (modQueue.length > 0) {
     const item = modQueue[0];
-
     const contextStr = chatHistory.map(msg => `[${msg.time}] ${msg.sender}: ${msg.message}`).join('\n');
     
     try {
@@ -106,7 +106,16 @@ async function processModQueue() {
           
           switch (decision.action.toUpperCase()) {
             case 'WARN':
-              say(`/msg ${target} WARNING: ${reason}. Please keep chat respectful.`);
+              // Hardcoded Strike System: Override the AI if they are already warned
+              if (warnedPlayers.has(target)) {
+                say(`/tempmute ${target} 10m ${reason} (Repeated violations after warning)`);
+                console.log(`[System] Escalated ${target} to MUTE. They ignored their first warning.`);
+              } else {
+                warnedPlayers.add(target);
+                // Public ping to guarantee they see it
+                say(`${target}, WARNING: ${reason}. Your next offense will result in an auto-mute.`);
+                console.log(`[System] Issued first warning to ${target}.`);
+              }
               break;
             case 'MUTE':
               const duration = decision.duration || '10m';
@@ -179,10 +188,8 @@ function createBot() {
     console.log('[Bot] Entity spawned. Initiating pre-flight checks...');
     isInGame = true;
 
-    // 1. Wait a moment for chunks and potential login prompts to appear
     await new Promise(r => setTimeout(r, 2000));
 
-    // 2. Wait for authentication to finish
     if (!isLoggedIn) {
       console.log('[System] Waiting for authentication...');
       let attempts = 0;
@@ -192,23 +199,19 @@ function createBot() {
       }
     }
 
-    // 3. Test Physical Sync
     console.log('[System] Testing server sync (Movement)...');
     bot.setControlState('jump', true);
     await new Promise(r => setTimeout(r, 300));
     bot.setControlState('jump', false);
 
-    // 4. Test Data Sync
     console.log(`[System] Testing server sync (Data)... Health: ${bot.health}, Food: ${bot.food}`);
 
-    // 5. Purge the MOTD buffer
     console.log('[System] Purging startup chat buffer (Waiting 3s)...');
     await new Promise(r => setTimeout(r, 3000));
 
     console.log('[System] >>> ALL CHECKS PASSED. MODERATION AGENT ARMED. <<<');
     isReady = true;
 
-    // Anti-AFK jump
     setInterval(() => {
       if (!bot.entity || !isInGame) return;
       if (Math.random() < 0.1) {
@@ -237,7 +240,6 @@ function createBot() {
     
     if (lower.includes('ignoring block entities')) return;
 
-    // Handle Login logic regardless of ready state
     if (!isLoggedIn && lower.includes('/login')) {
       console.log('[Bot] Auto-logging in...');
       say('/login 551417114');
@@ -250,8 +252,6 @@ function createBot() {
     }
     if (lower.includes('limbo') || lower.includes('queue')) isInGame = false;
 
-    // >>> THE GATEKEEPER <<<
-    // Ignore all general chat and moderation duties until system checks pass
     if (!isReady) return;
 
     if (lower.includes('teleport to you')) {
@@ -259,7 +259,6 @@ function createBot() {
       return;
     }
 
-    // Ignore systemic spam
     const isServerMessage = /^\[(Server|INFO|WARN|ERROR|System)\]/i.test(text) ||
                             /^\*{3}/.test(text) ||
                             /^\[[+\-]\]/.test(text) ||
@@ -296,11 +295,9 @@ function createBot() {
 
     console.log(`[Chat] ${sender}: ${message}`);
 
-    // Push to agent's memory
     chatHistory.push({ time: new Date().toLocaleTimeString(), sender, message });
     if (chatHistory.length > MAX_HISTORY) chatHistory.shift();
 
-    // Queue for moderation
     if (modQueue.length < CONFIG.groq.maxQueueSize) {
       modQueue.push({ sender, message });
       processModQueue();
@@ -310,7 +307,7 @@ function createBot() {
   });
 
   bot.on('health', () => {
-    if (!isReady) return; // Don't try to eat while booting up
+    if (!isReady) return; 
     if (bot.food < 14) {
       const food = bot.inventory.items().find(item =>
         item.name.includes('apple') || item.name.includes('bread') ||
