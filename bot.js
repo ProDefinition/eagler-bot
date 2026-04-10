@@ -25,7 +25,7 @@ const CONFIG = {
   },
   groq: {
     apiKey: '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', // <-- API KEY
-    model: 'llama3-8b-8192',          // Valid Groq model for fast, logical reasoning
+    model: 'openai/gpt-oss-20b',          // Valid Groq model for fast, logical reasoning
     maxQueueSize: 100                 
   }
 };
