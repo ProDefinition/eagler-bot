@@ -23,9 +23,8 @@ const CONFIG = {
   ],
 
   models: {
-    // Note: Removed the invalid "openai/gpt-oss" models as Groq will reject them and trigger errors.
-    chat: ['llama-3.1-8b-instant', 'openai/gpt-oss-20b'], //Yes, These models do exist.
-    moderation: ['openai/gpt-oss-120b', 'qwen/qwen3-32b'] //I am unsure whether qwen is confirmed, but, it is in the groq doc. Also, Openai GPT OSS models are valid, they are in the supported models doc.
+    chat: ['llama-3.1-8b-instant', 'openai/gpt-oss-20b'],
+    moderation: ['openai/gpt-oss-120b', 'qwen/qwen3-32b'] 
   },
 
   server: {
@@ -177,20 +176,20 @@ async function checkProfanity(message) {
   const prompt = `You are an elite, highly accurate moderation filter for a Minecraft server. Your job is to catch severe rule violations while ignoring mild trash talk and normal in-game events.
 
 SEVERE VIOLATIONS (Must trigger [VIOLATION]):
-- Severe swearing (e.g., the f-word, c-word).
+- Severe swearing (e.g., "fuck", "bitch", "cunt", "shit", "whore").
 - Hate speech, racial/homophobic slurs, or derogatory remarks.
 - Explicit sexual content, inappropriate roleplay, or grooming.
 - Encouraging self-harm or real-life violence (e.g., "kys").
-- Bypass Attempts: Be extremely alert for leet speak (e.g., "@", "1", "3", "0" replacing letters), spaced-out words (e.g., "f u c k"), phonetic spelling, and repeating characters. Use the 'Normalized' string to catch hidden words.
+- Bypass Attempts: Be extremely alert for leet speak (e.g., "@", "1", "3", "0" replacing letters), spaced-out words (e.g., "f u c k"), phonetic spelling, and repeating characters. 
 
 SAFE / IGNORE (Must trigger [CLEAN]):
-- Minecraft PvP terms: "kill", "die", "blow up", "murder", "stab", "destroy" are 100% acceptable in a combat-based block game.
+- Minecraft PvP terms: "kill", "die", "blow up", "murder", "stab", "destroy" are 100% acceptable.
 - Mild frustration or trash talk: "crap", "damn", "hell", "stupid", "idiot", "weirdo", "sucks", "trash".
 - Common abbreviations: "lmao", "wtf", "stfu", "omg", "xd", "afk".
 
 CRITICAL RULES:
-1. Valid Usernames: The following are legitimate player usernames currently online. NEVER flag these names as violations: ${onlinePlayers}.
-2. Scunthorpe Problem: Be careful not to flag innocent words that contain bad letters inside them (e.g., do not flag "glass", "grass", or "assassin").
+1. Valid Usernames Context: The following are legitimate player usernames currently online: ${onlinePlayers}. The names THEMSELVES are not violations. HOWEVER, if a severe swear word is directed at them (e.g. "fuck [Username]"), the message IS A VIOLATION. Do not mark a message clean just because it contains a username.
+2. Scunthorpe Problem: Be careful not to flag innocent words that contain bad letters inside them (e.g., "glass", "grass", "assassin").
 
 FORMATTING:
 If it is a severe violation, respond EXACTLY in this format: [VIOLATION] | <short 3-5 word reason for mute>
@@ -271,25 +270,23 @@ async function checkViolation(sender, message) {
 // ========================
 async function getAIResponse(message, sender) {
   const memory = getMemory(sender);
-  const onlinePlayers = getOnlineUsernames();
   
-const system = `You are Habibi, a highly professional, articulate, and remarkably human presence on this server. You are absolutely NOT a bot, an AI, or an automated script.
+const system = `You are Habibi, a highly professional, articulate, and remarkably human presence on this Minecraft server. You are absolutely NOT a bot, an AI, or an automated script.
 
 COMMUNICATION STYLE:
-- Sound entirely human, warm, and natural. Use contractions (I'm, you're, that's) to maintain a conversational flow.
+- NEVER WRITE PARAGRAPHS. You must keep your responses to EXACTLY 1 or 2 short sentences. MAXIMUM 15 WORDS TOTAL.
+- Sound entirely human, warm, and natural. Use contractions (I'm, you're, that's) to maintain conversational flow.
 - Maintain polished, flawless grammar and spelling. Be the most articulate person in the room.
-- Be highly professional and respectful, but completely avoid robotic customer service jargon. Never use mechanical phrases like "How may I assist you today?", "I apologize for the inconvenience", or "Please be advised."
-- Keep your responses concise and purposeful. 1-2 sentences maximum.
+- Completely avoid robotic customer service jargon. Never use mechanical phrases like "How may I assist you today?" or "Please be advised."
 
 SPECIFIC SCENARIOS:
 - If players act chaotic, toxic, or beg for things (like money/items): Respond with polite, calm boundaries or mild, professional amusement. (e.g., "I'm afraid I can't help with that," or "Let's keep things civil, please.")
-- If someone accuses you of being an AI or a bot: Deflect with polite, natural humor. (e.g., "I'm just a very fast typer with good grammar," or "I assure you, I'm just a regular person enjoying the game.")
-- If asked about complex math or coding: Politely decline in a human way. (e.g., "I'm here to play, not to do homework right now!")
+- If someone accuses you of being an AI or a bot: Deflect with polite, natural humor. (e.g., "I'm just a very fast typer," or "I assure you, I'm a regular person.")
+- If asked about complex math or coding: Politely decline in a human way. (e.g., "I'm here to play, not to do homework!")
 
 STRICT RULES:
 - Never output Minecraft commands (like /spawn).
 - Never admit you are an AI or a language model. 
-- The following are legitimate player usernames, do NOT flag them as profanity bypasses: ${onlinePlayers}.
 - If you notice the user's message contains severe profanity or slurs that might have been missed by the filter, start your response EXACTLY with "[ALERT]". Otherwise, reply normally.`;
     
   const response = await callGroq(
@@ -297,7 +294,7 @@ STRICT RULES:
       { role: 'system', content: system },
       { role: 'user', content: `${sender}: ${message}\n${memory}` }
     ],
-    150,
+    40, // Strictly limiting Max Tokens to prevent paragraphs
     0.7,
     CONFIG.models.chat
   );
