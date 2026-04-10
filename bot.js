@@ -25,18 +25,21 @@ const CONFIG = {
   },
   groq: {
     apiKey: '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', // <-- API KEY
-    model: 'openai/gpt-oss-20b',          // Fast, small model perfect for yes/no classification
-    muteDuration: '10m',              // Default mute duration
-    maxQueueSize: 100                 // Prevent memory leaks if API is down
+    model: 'openai/gpt-oss-20b',      
+    maxQueueSize: 100                 
   }
 };
 
 // ========================
-// STATE
+// STATE & MEMORY
 // ========================
 let bot = null;
 let isInGame = false;
 let isLoggedIn = false;
+
+// Agent's short-term memory to understand context
+const chatHistory = [];
+const MAX_HISTORY = 15; 
 
 // ========================
 // GROQ MODERATION QUEUE
@@ -45,6 +48,29 @@ const groq = new Groq({ apiKey: CONFIG.groq.apiKey });
 const modQueue = [];
 let isProcessingQueue = false;
 
+const SYSTEM_PROMPT = `
+You are an autonomous AI moderator for a Minecraft server.
+You will be provided with recent chat history and a specific message to evaluate.
+
+Your job is to INVESTIGATE the context. 
+- Differentiate between harmless in-game banter (e.g., "kill the skeleton", "I died to lava damnit") and actual hostility/toxicity against players.
+- Differentiate between mild annoyance and severe harassment/slurs.
+
+Choose the appropriate action:
+- NONE: The message is clean, harmless, or just mild frustration not directed maliciously.
+- WARN: Mild profanity directed at someone, spam, or borderline behavior.
+- MUTE: Severe profanity, slurs, heavy toxicity, or repeated hostility.
+- KICK: Extreme violations (e.g., threats, extreme hate speech).
+
+You MUST respond strictly in valid JSON format. Do not include markdown formatting or extra text.
+{
+  "action": "NONE" | "WARN" | "MUTE" | "KICK",
+  "target": "username of offender",
+  "duration": "10m" (only required if action is MUTE, e.g., 5m, 30m, 1h),
+  "reason": "Brief, professional reason for the punishment"
+}
+`;
+
 async function processModQueue() {
   if (isProcessingQueue || modQueue.length === 0) return;
   isProcessingQueue = true;
@@ -52,50 +78,62 @@ async function processModQueue() {
   while (modQueue.length > 0) {
     const item = modQueue[0];
 
+    // Build the context string
+    const contextStr = chatHistory.map(msg => `[${msg.time}] ${msg.sender}: ${msg.message}`).join('\n');
+    
     try {
       const response = await groq.chat.completions.create({
         messages: [
-          {
-            role: 'system',
-            content: 'You are a strict chat moderator. Respond ONLY with "YES" if the message contains profanity, slurs, or severe toxicity. Respond ONLY with "NO" if the message is clean.'
-          },
-          {
-            role: 'user',
-            content: `Message: "${item.message}"`
-          }
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: `CHAT HISTORY:\n${contextStr || 'No prior history.'}\n\nINVESTIGATE THIS MESSAGE:\nSender: ${item.sender}\nMessage: "${item.message}"` }
         ],
         model: CONFIG.groq.model,
-        temperature: 0, // Strict, deterministic output
-        max_tokens: 5,  // We only need a yes/no
+        temperature: 0.1, // Low temp for highly logical decisions
+        max_tokens: 150,  // Enough for the JSON payload
       });
 
-      const reply = response.choices[0]?.message?.content?.trim().toUpperCase() || 'NO';
+      let reply = response.choices[0]?.message?.content?.trim() || '{}';
+      
+      // Cleanup: Strip markdown block if the LLM adds it (e.g., ```json ... ```)
+      reply = reply.replace(/^```json/i, '').replace(/```$/, '').trim();
 
-      if (reply.includes('YES')) {
-        // Truncate to ensure the command doesn't exceed Minecraft's max length (256 chars)
-        const safeMessage = item.message.length > 40 ? item.message.substring(0, 37) + '...' : item.message;
-        const muteCommand = `/tempmute ${item.sender} ${CONFIG.groq.muteDuration} Auto-Mod Profanity: ${safeMessage}`;
+      try {
+        const decision = JSON.parse(reply);
         
-        say(muteCommand);
-        console.log(`[Moderation] Muted ${item.sender}. Reason: Profanity detected by AI.`);
+        // Execute the Agent's decision
+        if (decision.action !== 'NONE') {
+          console.log(`[Agent] Decision for ${item.sender}:`, decision);
+          
+          const target = decision.target || item.sender;
+          const reason = decision.reason ? `AutoMod: ${decision.reason}` : `AutoMod: Policy violation`;
+          
+          switch (decision.action.toUpperCase()) {
+            case 'WARN':
+              say(`/msg ${target} WARNING: ${reason}. Please keep chat respectful.`);
+              break;
+            case 'MUTE':
+              const duration = decision.duration || '10m';
+              say(`/tempmute ${target} ${duration} ${reason}`);
+              break;
+            case 'KICK':
+              say(`/kick ${target} ${reason}`);
+              break;
+          }
+        }
+      } catch (parseError) {
+        console.error(`[Moderation] Agent returned invalid JSON:`, reply);
       }
 
-      // Successfully processed, remove from queue
       modQueue.shift(); 
-      
-      // Small artificial delay to respect API rate limits
-      await new Promise(r => setTimeout(r, 600)); 
+      await new Promise(r => setTimeout(r, 800)); // Rate limit buffer
 
     } catch (error) {
       if (error.status === 429) {
-        // Rate Limit Hit
         console.warn(`[Moderation] Rate limit hit! Queue size: ${modQueue.length}. Pausing for 10s...`);
         await new Promise(r => setTimeout(r, 10000));
-        // We DO NOT shift the array here. The message stays at [0] and will retry on the next loop.
       } else {
-        // Network errors or API outages
         console.error(`[Moderation] API Error: ${error.message}`);
-        modQueue.shift(); // Drop the message so the queue doesn't lock up forever
+        modQueue.shift(); 
       }
     }
   }
@@ -116,7 +154,6 @@ function say(text) {
     return;
   }
 
-  // Split long messages
   let remaining = text;
   while (remaining.length > 0) {
     let chunk = remaining.slice(0, CONFIG.chat.max_length);
@@ -142,10 +179,9 @@ function createBot() {
   });
 
   bot.once('spawn', () => {
-    console.log('[Bot] Spawned!');
+    console.log('[Bot] Spawned! Agentic moderation active.');
     isInGame = true;
 
-    // Anti-AFK jump
     setInterval(() => {
       if (!bot.entity || !isInGame) return;
       if (Math.random() < 0.1) {
@@ -191,13 +227,13 @@ function createBot() {
       return;
     }
 
-    // Aggressive server message filtering
+    // Ignore systemic spam
     const isServerMessage = /^\[(Server|INFO|WARN|ERROR|System)\]/i.test(text) ||
                             /^\*{3}/.test(text) ||
                             /^\[[+\-]\]/.test(text) ||
                             /(joined|left) the game/i.test(text) ||
                             /(time|seconds|queue|position|limbo|lifesteal|full|estimated)/i.test(text) ||
-                            /(tempmuted|unmuted|muted|banned|kicked)/i.test(text) ||
+                            /(tempmuted|unmuted|muted|banned|kicked|warned)/i.test(text) ||
                             /^Habibi/i.test(text) ||
                             /\[Spartan Notification\]/i.test(text) ||
                             /Welcome back!/i.test(text);
@@ -207,14 +243,12 @@ function createBot() {
     let message = null;
 
     const cleanText = text.replace(/^(?:\[[^\]]+\]\s*)*(?:MOD|HELPER|SRHELPER|OWNER|ADMIN|COOWNER|BUILDER|VIP|MVP|YOUTUBE)\s+/i, '');
-
     const match1 = cleanText.match(/^([a-zA-Z0-9_]{3,16})\s*[:»\-]\s*(.+)/);
+    
     if (match1) {
       sender = match1[1];
       message = match1[2];
-    }
-
-    if (!sender && text.includes(':')) {
+    } else if (text.includes(':')) {
       const parts = text.split(':');
       const beforeColon = parts[0].replace(/^\[.*?\]\s*/, '').trim();
       const words = beforeColon.split(/\s+/);
@@ -225,18 +259,22 @@ function createBot() {
       }
     }
 
-    // Ignore self and empty/system-like short messages
     if (!sender || !message || sender === CONFIG.server.username || sender === 'detected') return;
     if (message.length < 2 || message.match(/^\d+\s+seconds$/i)) return;
 
+    // Log the parsed chat
     console.log(`[Chat] ${sender}: ${message}`);
 
-    // Queue message for AI moderation (Everything parsed is checked)
+    // Push to agent's memory
+    chatHistory.push({ time: new Date().toLocaleTimeString(), sender, message });
+    if (chatHistory.length > MAX_HISTORY) chatHistory.shift();
+
+    // Queue for moderation
     if (modQueue.length < CONFIG.groq.maxQueueSize) {
       modQueue.push({ sender, message });
       processModQueue();
     } else {
-      console.warn('[Moderation] Warning: Queue is full. Dropping incoming message.');
+      console.warn('[Moderation] Warning: Queue full. Skipping message.');
     }
   });
 
