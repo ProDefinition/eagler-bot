@@ -25,7 +25,9 @@ const CONFIG = {
   },
   groq: {
     apiKey: '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', 
-    model: 'openai/gpt-oss-20b',      // Restored to your correct model
+    chatApiKey: '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', // <-- Updated Chat API Key
+    model: 'openai/gpt-oss-20b',      
+    chatModel: 'llama-3.1-8b-instant',
     maxQueueSize: 100                 
   }
 };
@@ -41,16 +43,20 @@ let isReady = false;
 // Agent's memory
 const chatHistory = [];
 const MAX_HISTORY = 15; 
-const warnedPlayers = new Set(); // Tracks who has already been warned
+const warnedPlayers = new Set(); 
 
 // ========================
-// GROQ MODERATION QUEUE
+// GROQ CLIENTS & QUEUES
 // ========================
-const groq = new Groq({ apiKey: CONFIG.groq.apiKey });
+const groq = new Groq({ apiKey: CONFIG.groq.apiKey }); // Moderation AI
+const chatGroq = new Groq({ apiKey: CONFIG.groq.chatApiKey }); // Conversational AI
+
 const modQueue = [];
 let isProcessingQueue = false;
 
-// STRICT ZERO-TOLERANCE PROMPT
+// ========================
+// AI PROMPTS
+// ========================
 const SYSTEM_PROMPT = `
 You are a ZERO-TOLERANCE, strict AI moderator for a Minecraft server.
 You will evaluate the provided chat message.
@@ -74,6 +80,26 @@ You MUST respond strictly in valid JSON format. Do not include markdown formatti
 }
 `;
 
+const CHAT_SYSTEM_PROMPT = `
+You are 'Habibi', a veteran Minecraft administrator. You've seen everything. You are highly realistic, grounded, and slightly cynical. 
+
+PERSONALITY & REALISM:
+- You are professional but speak like a real person. Use lowercase occasionally, use common internet shorthand (idk, mb, dw, lol) where it feels natural.
+- RELEVANCE: Only respond if the message is actually worth your time. 
+- IGNORING: If a player is being annoying, asking stupid questions, or saying something nonsensical, respond with the exact word "[IGNORE]".
+- DISMISSIVENESS: If you don't want to explain something, just say "idk" or "google it" or "not my problem."
+- THE RIZZ: On extremely rare occasions (1 in 50 chance), if a player is being genuinely cool or charming, you can drop a very subtle, smooth, or charismatic line. Do not be thirsty; be "cool."
+- You are an AI, but don't act like a corporate assistant. Act like a guy who gets paid to keep this server running.
+
+RULES:
+- Responses MUST be under 140 characters.
+- No emojis. No markdown.
+- Address players by name.
+`;
+
+// ========================
+// CHAT & MODERATION LOGIC
+// ========================
 async function processModQueue() {
   if (isProcessingQueue || modQueue.length === 0) return;
   isProcessingQueue = true;
@@ -89,7 +115,7 @@ async function processModQueue() {
           { role: 'user', content: `CHAT HISTORY:\n${contextStr || 'No prior history.'}\n\nEVALUATE THIS MESSAGE:\nSender: ${item.sender}\nMessage: "${item.message}"` }
         ],
         model: CONFIG.groq.model,
-        temperature: 0.0, // Zero variance, strictly factual decisions
+        temperature: 0.0, 
         max_tokens: 150,  
       });
 
@@ -103,19 +129,15 @@ async function processModQueue() {
           console.log(`[Agent] Decision for ${item.sender}:`, decision);
           
           const target = decision.target || item.sender;
-          // Ensure reasons don't trigger anti-caps plugins
           const reason = decision.reason ? `Automod: ${decision.reason}` : `Automod: Policy violation`;
           
           switch (decision.action.toUpperCase()) {
             case 'WARN':
               if (warnedPlayers.has(target)) {
-                // Strike 2: Instant Mute
                 say(`/tempmute ${target} 10m ${reason} (Ignored Warning)`);
-                console.log(`[System] Escalated ${target} to MUTE. They ignored their first warning.`);
+                console.log(`[System] Escalated ${target} to MUTE.`);
               } else {
-                // Strike 1: Warning
                 warnedPlayers.add(target);
-                // Lowercase formatting to bypass aggressive anti-caps plugins
                 say(`${target}, warning: ${reason}. next offense is a mute.`);
                 console.log(`[System] Issued first warning to ${target}.`);
               }
@@ -138,7 +160,7 @@ async function processModQueue() {
 
     } catch (error) {
       if (error.status === 429) {
-        console.warn(`[Moderation] Rate limit hit! Queue size: ${modQueue.length}. Pausing for 10s...`);
+        console.warn(`[Moderation] Rate limit hit! Pausing for 10s...`);
         await new Promise(r => setTimeout(r, 10000));
       } else {
         console.error(`[Moderation] API Error: ${error.message}`);
@@ -150,6 +172,38 @@ async function processModQueue() {
   isProcessingQueue = false;
 }
 
+async function handleChatResponse(sender, message) {
+  try {
+    const response = await chatGroq.chat.completions.create({
+      messages: [
+        { role: 'system', content: CHAT_SYSTEM_PROMPT },
+        { role: 'user', content: `${sender}: ${message}` }
+      ],
+      model: CONFIG.groq.chatModel,
+      temperature: 0.9, // Higher temperature makes him more unpredictable/human-like
+      max_tokens: 60,
+    });
+
+    let reply = response.choices[0]?.message?.content?.trim();
+
+    // Logic to "Ignore" the player if the AI thinks the message is a waste of time
+    if (!reply || reply.includes('[IGNORE]') || reply === '...') {
+      console.log(`[AI Chat] Habibi decided to ignore ${sender}.`);
+      return; 
+    }
+    
+    // Occasionally strip formal punctuation to look more like a real player
+    if (Math.random() > 0.5) {
+      reply = reply.toLowerCase().replace(/[.!?]$/, "");
+    }
+
+    say(reply);
+    console.log(`[AI Chat] Responded to ${sender}: ${reply}`);
+  } catch (error) {
+    console.error(`[AI Chat] API Error: ${error.message}`);
+  }
+}
+
 // ========================
 // UTILITIES
 // ========================
@@ -157,7 +211,6 @@ function say(text) {
   if (!bot || !text) return;
   text = text.replace(/[\n\r]/g, ' ').trim();
   
-  // Slight delay before sending to avoid triggering the server's anti-spam
   setTimeout(() => {
     if (text.length <= CONFIG.chat.max_length) {
       console.log(`[Say] ${text}`);
@@ -177,7 +230,7 @@ function say(text) {
         bot.chat(chunk);
       }, delay);
       
-      delay += 500; // 500ms between long message chunks
+      delay += 500; 
       remaining = remaining.slice(chunk.length).trim();
     }
   }, 250);
@@ -217,11 +270,10 @@ function createBot() {
     bot.setControlState('jump', false);
 
     console.log(`[System] Testing server sync (Data)... Health: ${bot.health}, Food: ${bot.food}`);
-
     console.log('[System] Purging startup chat buffer (Waiting 3s)...');
     await new Promise(r => setTimeout(r, 3000));
 
-    console.log('[System] >>> ALL CHECKS PASSED. MODERATION AGENT ARMED. <<<');
+    console.log('[System] >>> ALL CHECKS PASSED. AGENT ARMED. <<<');
     isReady = true;
 
     setInterval(() => {
@@ -238,7 +290,7 @@ function createBot() {
     isInGame = false;
     isLoggedIn = false;
     isReady = false;
-    setTimeout(createBot, 15000); // 15s delay to fix ghost player glitch
+    setTimeout(createBot, 15000); 
   });
 
   bot.on('error', (err) => console.log(`[Error] ${err.message}`));
@@ -307,14 +359,21 @@ function createBot() {
 
     console.log(`[Chat] ${sender}: ${message}`);
 
+    // Update memory
     chatHistory.push({ time: new Date().toLocaleTimeString(), sender, message });
     if (chatHistory.length > MAX_HISTORY) chatHistory.shift();
 
+    // 1. Process Moderation
     if (modQueue.length < CONFIG.groq.maxQueueSize) {
       modQueue.push({ sender, message });
       processModQueue();
     } else {
       console.warn('[Moderation] Warning: Queue full. Skipping message.');
+    }
+
+    // 2. Process Conversation (Triggered if bot is mentioned)
+    if (message.toLowerCase().includes(CONFIG.server.username.toLowerCase())) {
+        handleChatResponse(sender, message);
     }
   });
 
@@ -343,7 +402,7 @@ function createBot() {
 // ========================
 function shutdown() {
   console.log('\n[System] Shutting down gracefully. Disconnecting bot...');
-  if (bot) bot.quit(); // Force close the connection so the server clears the ghost
+  if (bot) bot.quit(); 
   setTimeout(() => process.exit(0), 500); 
 }
 
