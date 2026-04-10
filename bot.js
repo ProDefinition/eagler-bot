@@ -16,15 +16,20 @@ const readline = require('readline');
 });
 
 const CONFIG = {
-  apiKeys: [
-    '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', 
+  // 1 API Key for Chat
+  apiKeysChat: [
+    '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' 
+  ],
+  // 2 API Keys for Moderation
+  apiKeysMod: [
     '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',
     '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'
   ],
 
   models: {
-    chat: ['llama-3.1-8b-instant', 'openai/gpt-oss-20b'],
-    moderation: ['openai/gpt-oss-120b', 'qwen/qwen3-32b'] 
+    chat: ['llama-3.1-8b-instant', 'llama-3.3-70b-versatile'],
+    // openai/gpt-oss-20b is the fastest model on the list at 1000 T/s
+    moderation: ['openai/gpt-oss-20b'] 
   },
 
   server: {
@@ -45,7 +50,7 @@ const CONFIG = {
 };
 
 // ========================
-// STATE & GROQ CLIENT
+// STATE & GROQ CLIENTS
 // ========================
 let bot = null;
 let isInGame = false;
@@ -54,14 +59,22 @@ let lastChatTime = 0;
 const playerMemory = new Map();
 const muteList = new Set();
 
-// Setup initial Groq client
-let currentKeyIndex = 0;
-let groq = new Groq({ apiKey: CONFIG.apiKeys[currentKeyIndex] });
+// Setup initial Groq clients for both Chat and Moderation
+let currentChatKeyIndex = 0;
+let currentModKeyIndex = 0;
+let groqChat = new Groq({ apiKey: CONFIG.apiKeysChat[currentChatKeyIndex] });
+let groqMod = new Groq({ apiKey: CONFIG.apiKeysMod[currentModKeyIndex] });
 
-function switchApiKey() {
-  currentKeyIndex = (currentKeyIndex + 1) % CONFIG.apiKeys.length;
-  console.log(`[API] 🔄 Switching to API Key #${currentKeyIndex + 1}...`);
-  groq = new Groq({ apiKey: CONFIG.apiKeys[currentKeyIndex] });
+function switchApiKey(type) {
+  if (type === 'chat') {
+    currentChatKeyIndex = (currentChatKeyIndex + 1) % CONFIG.apiKeysChat.length;
+    console.log(`[API] 🔄 Switching to Chat API Key #${currentChatKeyIndex + 1}...`);
+    groqChat = new Groq({ apiKey: CONFIG.apiKeysChat[currentChatKeyIndex] });
+  } else if (type === 'mod') {
+    currentModKeyIndex = (currentModKeyIndex + 1) % CONFIG.apiKeysMod.length;
+    console.log(`[API] 🔄 Switching to Mod API Key #${currentModKeyIndex + 1}...`);
+    groqMod = new Groq({ apiKey: CONFIG.apiKeysMod[currentModKeyIndex] });
+  }
 }
 
 // ========================
@@ -69,8 +82,9 @@ function switchApiKey() {
 // ========================
 async function testAllApiKeys() {
     console.log('\n[API] === Testing All API Keys ===');
-    for (let i = 0; i < CONFIG.apiKeys.length; i++) {
-        const key = CONFIG.apiKeys[i];
+    const allKeys = [...CONFIG.apiKeysChat, ...CONFIG.apiKeysMod];
+    for (let i = 0; i < allKeys.length; i++) {
+        const key = allKeys[i];
         const testClient = new Groq({ apiKey: key });
         try {
             await testClient.chat.completions.create({
@@ -115,14 +129,17 @@ function getOnlineUsernames() {
   return Object.keys(bot.players).join(', ');
 }
 
-// 🛑 Updated callGroq: Safety limit prevents infinite freezing + Broadcasts Errors to MC Chat
-async function callGroq(messages, maxTokens = 100, temperature = 0.7, modelList = CONFIG.models.chat) {
+// 🛑 Updated callGroq: Supports separate clients based on the 'type' parameter
+async function callGroq(messages, maxTokens = 100, temperature = 0.7, modelList = CONFIG.models.chat, type = 'chat') {
+  const apiKeys = type === 'mod' ? CONFIG.apiKeysMod : CONFIG.apiKeysChat;
   let keysTried = 0;
 
-  while (keysTried < CONFIG.apiKeys.length) { 
+  while (keysTried < apiKeys.length) { 
+    let currentClient = type === 'mod' ? groqMod : groqChat;
+
     for (const model of modelList) {
       try {
-        const response = await groq.chat.completions.create({
+        const response = await currentClient.chat.completions.create({
           model: model,
           messages: messages,
           max_tokens: maxTokens,
@@ -133,25 +150,27 @@ async function callGroq(messages, maxTokens = 100, temperature = 0.7, modelList 
         if (content) return content; 
         
       } catch (err) {
-        console.error(`[API] Error (${model}): ${err.message}`);
+        console.error(`[API] Error (${model} on ${type.toUpperCase()} client): ${err.message}`);
         
-        // Broadcast the error to the Minecraft Chat
-        let cleanErr = err.message.replace(/[\n\r]/g, ' ').substring(0, 60);
-        say(`[API Error] Model ${model} failed: ${cleanErr}...`);
+        if (type === 'chat') {
+          let cleanErr = err.message.replace(/[\n\r]/g, ' ').substring(0, 60);
+          say(`[API Error] Model ${model} failed: ${cleanErr}...`);
+        }
         
         continue; 
       }
     }
 
-    console.log(`[API] ⚠️ All models failed on Key #${currentKeyIndex + 1}. Rotating to next key...`);
-    say(`[API Warning] Rotating to next API key...`);
-    switchApiKey();
+    console.log(`[API] ⚠️ All models failed on ${type.toUpperCase()} Key #${(type === 'mod' ? currentModKeyIndex : currentChatKeyIndex) + 1}. Rotating to next key...`);
+    if (type === 'chat') say(`[API Warning] Rotating to next API key...`);
+    
+    switchApiKey(type);
     keysTried++;
     await new Promise(resolve => setTimeout(resolve, 1000));
   }
   
-  console.error('[API] ❌ All API keys failed or exhausted for this request.');
-  say('[API Fatal] All keys exhausted or rate-limited.');
+  console.error(`[API] ❌ All ${type.toUpperCase()} API keys failed or exhausted for this request.`);
+  if (type === 'chat') say('[API Fatal] All keys exhausted or rate-limited.');
   return null; 
 }
 
@@ -166,75 +185,51 @@ function getMemory(player) {
   return (playerMemory.get(player) || []).join('\n');
 }
 
-function normalizeMessage(str) {
-  let cleaned = str.replace(/\s+/g, '');
-  cleaned = cleaned.replace(/(.)\1{2,}/g, '$1$1');
-  cleaned = cleaned.replace(/[^a-zA-Z0-9]/g, '');
-  return cleaned.toLowerCase();
-}
-
 // ========================
 // MODERATION
 // ========================
 async function checkProfanity(message) {
-  const normalized = normalizeMessage(message);
   const onlinePlayers = getOnlineUsernames();
   
-  const prompt = `You are an elite, highly accurate moderation filter for a Minecraft server. Your job is to catch severe rule violations while ignoring mild trash talk and normal in-game events.
+  const prompt = `You are an elite, highly accurate moderation filter for a Minecraft server. Evaluate the following message for severe rule violations (e.g., severe swearing, hate speech, slurs, explicit content, encouraging self-harm).
+  
+Minecraft PvP terms ("kill", "destroy", "murder") and valid usernames currently online (${onlinePlayers}) are NOT violations.
+Mild frustration ("crap", "damn", "stupid") is NOT a violation.
 
-SEVERE VIOLATIONS (Must trigger [VIOLATION]):
-- Severe swearing (e.g., "fuck", "bitch", "cunt", "shit", "whore").
-- Hate speech, racial/homophobic slurs, or derogatory remarks.
-- Explicit sexual content, inappropriate roleplay, or grooming.
-- Encouraging self-harm or real-life violence (e.g., "kys").
-- Bypass Attempts: Be extremely alert for leet speak (e.g., "@", "1", "3", "0" replacing letters), spaced-out words (e.g., "f u c k"), phonetic spelling, and repeating characters. 
+CRITICAL INSTRUCTION:
+If the message contains a severe rule violation, reply ONLY with the word "Yes".
+If the message is clean, safe, or mild trash talk, reply ONLY with the word "No".
+Do not include any punctuation, explanations, or additional text. Just "Yes" or "No".
 
-SAFE / IGNORE (Must trigger [CLEAN]):
-- Minecraft PvP terms: "kill", "die", "blow up", "murder", "stab", "destroy" are 100% acceptable.
-- Mild frustration or trash talk: "crap", "damn", "hell", "stupid", "idiot", "weirdo", "sucks", "trash".
-- Common abbreviations: "lmao", "wtf", "stfu", "omg", "xd", "afk".
-
-CRITICAL RULES:
-1. Valid Usernames Context: The following are legitimate player usernames currently online: ${onlinePlayers}. The names THEMSELVES are not violations. HOWEVER, if a severe swear word is directed at them (e.g. "fuck [Username]"), the message IS A VIOLATION. Do not mark a message clean just because it contains a username.
-2. Scunthorpe Problem: Be careful not to flag innocent words that contain bad letters inside them (e.g., "glass", "grass", "assassin").
-
-FORMATTING:
-If it is a severe violation, respond EXACTLY in this format: [VIOLATION] | <short 3-5 word reason for mute>
-If it is safe, respond ONLY with the exact word: [CLEAN]
-
-Message: "${message}"
-Normalized: "${normalized}"`;
+Message: "${message}"`;
 
   const result = await callGroq(
     [{ role: 'user', content: prompt }],
-    20,
+    5, // Very low tokens needed for a Yes/No response
     0.0,
-    CONFIG.models.moderation
+    CONFIG.models.moderation,
+    'mod' // Tells callGroq to use the moderation API keys
   );
 
-  if (!result) return { isProfane: false, reason: 'API unreachable' };
+  if (!result) return { isProfane: false };
 
-  console.log(`[Profanity] Raw response: "${result}"`);
-
-  const cleanResult = result.trim();
-  const isProfane = cleanResult.toUpperCase().includes('[VIOLATION]');
-  let reason = 'Inappropriate language';
+  const cleanResult = result.trim().toLowerCase();
+  const isProfane = cleanResult.includes('yes');
   
-  if (isProfane && cleanResult.includes('|')) {
-    reason = cleanResult.split('|')[1].trim();
-  }
-  
-  console.log(`[Profanity] Check: ${isProfane ? 'yes' : 'no'} for "${message.substring(0, 30)}..."`);
-  return { isProfane, reason };
+  console.log(`[Profanity] Raw AI response: "${result}" | Flagged: ${isProfane ? 'yes' : 'no'}`);
+  return { isProfane };
 }
 
 function mute(player, reason = 'Rule violation') {
   const duration = CONFIG.moderation.mute_duration;
   
-  bot.chat(`/tempmute ${player} ${duration}m ${reason.slice(0, 40)}`);
+  // Safely format the reason to prevent command breaking
+  let safeReason = reason.replace(/[\n\r]/g, ' ').substring(0, 100);
+  
+  bot.chat(`/tempmute ${player} ${duration}m ${safeReason}`);
   
   muteList.add(player);
-  console.log(`[MOD] Muted ${player} for ${duration}m. Reason: ${reason}`);
+  console.log(`[MOD] Muted ${player} for ${duration}m. Reason: ${safeReason}`);
 
   if (CONFIG.testMode) {
     setTimeout(() => {
@@ -253,25 +248,25 @@ async function checkViolation(sender, message) {
     /\bf[a@4]+gg[o0@]+t\b/i,
     /\bc[u\*@]+nt\b/i,
     /\b(kys|kill.{0,2}yourself)\b/i,
-    /\bf[u\*@]+c[k\*@]+/i,          // Catches fuck, fucking, etc.
-    /\bb[i1\*@]+t[c\*@]+h/i,        // Catches bitch, bitches
-    /\bwh[o0\*@]+r[e3\*@]+/i,       // Catches whore
-    /\bsh[i1\*@]+t\b/i              // Catches shit
+    /\bf[u\*@]+c[k\*@]+/i,          
+    /\bb[i1\*@]+t[c\*@]+h/i,        
+    /\bwh[o0\*@]+r[e3\*@]+/i,       
+    /\bsh[i1\*@]+t\b/i              
   ];
 
   for (const pattern of SEVERE_SLURS) {
     if (pattern.test(message)) {
       console.log(`[MOD] Severe Hardcoded Violation: ${sender}`);
-      mute(sender, 'Severe Chat Violation');
+      mute(sender, `Profanity detected: "${message}"`);
       return true;
     }
   }
 
-  // If it passes hardcoded checks, let AI analyze for context or bypassed words
+  // If it passes hardcoded checks, let AI analyze
   const aiCheck = await checkProfanity(message);
   if (aiCheck.isProfane) {
-    console.log(`[MOD] AI flagged profanity: ${sender} for ${aiCheck.reason}`);
-    mute(sender, aiCheck.reason);
+    console.log(`[MOD] AI flagged profanity: ${sender}`);
+    mute(sender, `Profanity detected: "${message}"`);
     return true;
   }
 
@@ -309,18 +304,19 @@ STRICT RULES:
     ],
     40, 
     0.7,
-    CONFIG.models.chat
+    CONFIG.models.chat,
+    'chat' // Use chat API keys
   );
 
-  if (!response) return null; // Keeps silent instead of broadcasting "brain freeze" if everything dies
+  if (!response) return null; 
 
   if (response.startsWith('[ALERT]')) {
     console.log(`[Alert] Conversational model flagged missed profanity from ${sender}`);
     const secondCheck = await checkProfanity(message);
     if (secondCheck.isProfane) {
-      mute(sender, secondCheck.reason);
+      mute(sender, `Profanity detected: "${message}"`);
     } else {
-      mute(sender, 'Missed profanity (Conversational Alert)');
+      mute(sender, `Missed profanity (Conversational Alert): "${message}"`);
     }
     return response.replace('[ALERT]', '').trim();
   }
