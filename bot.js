@@ -4,7 +4,7 @@ const { pathfinder, Movements } = require('mineflayer-pathfinder');
 const { plugin: collectBlock } = require('mineflayer-collectblock');
 const readline = require('readline');
 
-// Catch log, warn, and error to ensure the chunk spam is completely muted.
+// Catch log, warn, and error to ensure chunk spam is completely muted.
 ['log', 'warn', 'error'].forEach((method) => {
     const original = console[method];
     console[method] = function(...args) {
@@ -22,6 +22,10 @@ const CONFIG = {
   apiKeysMod: [
     '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',
     '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'
+  ],
+  // 🛑 ADD YOUR BACKGROUND API KEY HERE
+  apiKeysBackground: [
+    'YOUR_BACKGROUND_API_KEY_HERE' 
   ],
 
   models: {
@@ -43,11 +47,11 @@ const CONFIG = {
     cooldown: 1000,   
     max_length: 250,  
   },
-  testMode: false,   
+  testMode: true,   
 };
 
 // ========================
-// STATE & MEMORY
+// STATE, MEMORY & QUEUES
 // ========================
 let bot = null;
 let isInGame = false;
@@ -56,25 +60,32 @@ let lastChatTime = 0;
 const playerMemory = new Map();
 const muteList = new Set();
 
+// The Global Event Log for Investigations (Stores last 100 chat/death events)
+const globalHistory = []; 
+
+// Background Queue for Rate-Limited Moderation Checks
+const modQueue = [];
+let isProcessingQueue = false;
+
 // ========================
 // BACKGROUND RATE-LIMIT MANAGER
 // ========================
 const keyPool = {
   chat: CONFIG.apiKeysChat.map((k, i) => ({ id: i + 1, key: k, status: 'active', cooldownUntil: 0 })),
-  mod: CONFIG.apiKeysMod.map((k, i) => ({ id: i + 1, key: k, status: 'active', cooldownUntil: 0 }))
+  mod: CONFIG.apiKeysMod.map((k, i) => ({ id: i + 1, key: k, status: 'active', cooldownUntil: 0 })),
+  background: CONFIG.apiKeysBackground.map((k, i) => ({ id: i + 1, key: k, status: 'active', cooldownUntil: 0 }))
 };
 
 function getAvailableKey(type) {
   const pool = keyPool[type];
   const now = Date.now();
   
-  // Background revival check
   pool.forEach(k => {
     if (k.status === 'cooldown' && now > k.cooldownUntil) {
       k.status = 'active';
       const msg = `[API Debug] ${type.toUpperCase()} Key #${k.id} finished cooldown. Back in action!`;
       console.log(msg);
-      say(msg);
+      if (type !== 'background') say(msg);
     }
   });
 
@@ -92,46 +103,22 @@ function handleKeyFailure(type, keyId, errorMsg) {
   
   if (isRateLimit) {
     keyObj.status = 'cooldown';
-    keyObj.cooldownUntil = Date.now() + 60000; // 60-second timeout
+    keyObj.cooldownUntil = Date.now() + 60000; 
     const msg = `[API Debug] ${type.toUpperCase()} Key #${keyId} hit a 429 Rate Limit. Sleeping for 60s.`;
     console.log(msg);
-    say(msg);
+    if (type !== 'background') say(msg);
   } else if (isAuthError) {
     keyObj.status = 'dead';
     const msg = `[API Debug] ${type.toUpperCase()} Key #${keyId} threw a 401. Key is dead or invalid.`;
     console.log(msg);
-    say(msg);
+    if (type !== 'background') say(msg);
   } else {
-    // Generic server issue, treat as temporary cooldown
     keyObj.status = 'cooldown';
-    keyObj.cooldownUntil = Date.now() + 15000; // 15-second timeout
+    keyObj.cooldownUntil = Date.now() + 15000; 
     const msg = `[API Debug] ${type.toUpperCase()} Key #${keyId} failed: ${cleanErr}. Sleeping 15s.`;
     console.log(msg);
-    say(msg);
+    if (type !== 'background') say(msg);
   }
-}
-
-// ========================
-// API KEY TESTER
-// ========================
-async function testAllApiKeys() {
-    console.log('\n[API] === Testing All API Keys ===');
-    const allKeys = [...CONFIG.apiKeysChat, ...CONFIG.apiKeysMod];
-    for (let i = 0; i < allKeys.length; i++) {
-        const key = allKeys[i];
-        const testClient = new Groq({ apiKey: key });
-        try {
-            await testClient.chat.completions.create({
-                model: 'llama-3.1-8b-instant',
-                messages: [{ role: 'user', content: 'Say "test"' }],
-                max_tokens: 5
-            });
-            console.log(`[API] Key #${i + 1} (${key.slice(0, 10)}...): ✅ VALID`);
-        } catch (err) {
-            console.log(`[API] Key #${i + 1} (${key.slice(0, 10)}...): ❌ FAILED - ${err.message}`);
-        }
-    }
-    console.log('[API] ============================\n');
 }
 
 // ========================
@@ -146,7 +133,6 @@ function say(text) {
     return;
   }
 
-  // Split long messages
   let remaining = text;
   while (remaining.length > 0) {
     let chunk = remaining.slice(0, CONFIG.chat.max_length);
@@ -174,6 +160,12 @@ function getMemory(player) {
   return (playerMemory.get(player) || []).join('\n');
 }
 
+function logGlobalEvent(text) {
+  const timestamp = new Date().toLocaleTimeString();
+  globalHistory.push(`[${timestamp}] ${text}`);
+  if (globalHistory.length > 100) globalHistory.shift();
+}
+
 // ========================
 // GROQ API CALLER
 // ========================
@@ -185,10 +177,10 @@ async function callGroq(messages, maxTokens = 100, temperature = 0.7, modelList 
     const activeKeyObj = getAvailableKey(type);
     
     if (!activeKeyObj) {
-      const msg = `[API Fatal] No active ${type.toUpperCase()} keys available! All dead or on cooldown.`;
+      const msg = `[API Fatal] No active ${type.toUpperCase()} keys available!`;
       console.error(msg);
-      say(msg);
-      return null;
+      if (type !== 'background') say(msg);
+      throw new Error('RATE_LIMIT_EXHAUSTED'); // Throw so we can catch and queue
     }
 
     const client = new Groq({ apiKey: activeKeyObj.key });
@@ -206,12 +198,10 @@ async function callGroq(messages, maxTokens = 100, temperature = 0.7, modelList 
         if (content) return content; 
         
       } catch (err) {
-        // If the error is network/auth related, kill/cooldown the key and break the model loop
         if (err.message.includes('429') || err.message.includes('401') || err.message.toLowerCase().includes('rate') || err.message.toLowerCase().includes('unauthorized')) {
             handleKeyFailure(type, activeKeyObj.id, err.message);
             break; 
         } else {
-            // If it's just a model failure (e.g. model offline), log it and try the next model on the same key
             console.error(`[API] Error (${model} on ${type.toUpperCase()} Key #${activeKeyObj.id}): ${err.message}`);
         }
       }
@@ -221,95 +211,180 @@ async function callGroq(messages, maxTokens = 100, temperature = 0.7, modelList 
     await new Promise(resolve => setTimeout(resolve, 1000));
   }
   
-  return null; 
+  throw new Error('RATE_LIMIT_EXHAUSTED');
 }
 
 // ========================
-// MODERATION
+// MODERATION & QUEUE PROCESSING
 // ========================
-async function checkProfanity(message) {
+async function checkProfanity(message, useBackgroundKey = false) {
   const onlinePlayers = getOnlineUsernames();
   
-  const prompt = `You are an elite, highly accurate moderation filter for a Minecraft server. Evaluate the following message for severe rule violations (e.g., severe swearing, hate speech, slurs, explicit content, encouraging self-harm).
+  const prompt = `You are an elite moderation filter for a Minecraft server. Evaluate the message for severe rule violations.
   
-Minecraft PvP terms ("kill", "destroy", "murder") and valid usernames currently online (${onlinePlayers}) are NOT violations.
-Mild frustration ("crap", "damn", "stupid") is NOT a violation.
+Violations include:
+- Severe swearing, slurs, or hate speech.
+- High toxicity, bullying, or targeted harassment.
+- Explicit, highly offensive, or "bad" content.
+
+Minecraft PvP terms ("kill", "destroy") and valid usernames (${onlinePlayers}) are NOT violations.
+Mild frustration ("crap", "stupid") is NOT a violation.
 
 CRITICAL INSTRUCTION:
-If the message contains a severe rule violation, reply ONLY with the word "Yes".
+If the message contains a severe rule violation or toxicity, reply ONLY with the word "Yes".
 If the message is clean, safe, or mild trash talk, reply ONLY with the word "No".
-Do not include any punctuation, explanations, or additional text. Just "Yes" or "No".
+Do not include any punctuation or explanations. Just "Yes" or "No".
 
 Message: "${message}"`;
 
-  const result = await callGroq(
-    [{ role: 'user', content: prompt }],
-    5, 
-    0.0,
-    CONFIG.models.moderation,
-    'mod' 
-  );
+  const apiType = useBackgroundKey ? 'background' : 'mod';
 
-  if (!result) return { isProfane: false };
+  try {
+    const result = await callGroq(
+      [{ role: 'user', content: prompt }],
+      5, 
+      0.0,
+      CONFIG.models.moderation,
+      apiType 
+    );
 
-  const cleanResult = result.trim().toLowerCase();
-  const isProfane = cleanResult.includes('yes');
-  
-  console.log(`[Profanity] Raw AI response: "${result}" | Flagged: ${isProfane ? 'yes' : 'no'}`);
-  return { isProfane };
-}
+    if (!result) return { isViolation: false };
 
-function mute(player, reason = 'Rule violation') {
-  const duration = CONFIG.moderation.mute_duration;
-  
-  let safeReason = reason.replace(/[:\n\r]/g, ' ').substring(0, 100);
-  
-  bot.chat(`/tempmute ${player} ${duration}m ${safeReason}`);
-  
-  muteList.add(player);
-  console.log(`[MOD] Muted ${player} for ${duration}m. Reason: ${safeReason}`);
+    const cleanResult = result.trim().toLowerCase();
+    const isViolation = cleanResult.includes('yes');
+    
+    console.log(`[Mod Check] Raw AI response: "${result}" | Flagged: ${isViolation ? 'yes' : 'no'}`);
+    return { isViolation };
 
-  if (CONFIG.testMode) {
-    setTimeout(() => {
-      bot.chat(`/unmute ${player}`);
-      console.log(`[TEST] Unmuted ${player} (test mode)`);
-    }, 500);
-  } else {
-    setTimeout(() => muteList.delete(player), duration * 60 * 1000);
+  } catch (err) {
+    if (err.message === 'RATE_LIMIT_EXHAUSTED') throw err;
+    return { isViolation: false };
   }
 }
 
+function punish(player, action, reason = 'Rule violation') {
+  const safeReason = reason.replace(/[:\n\r]/g, ' ').substring(0, 100);
+  
+  if (action === 'mute') {
+    const duration = CONFIG.moderation.mute_duration;
+    bot.chat(`/tempmute ${player} ${duration}m ${safeReason}`);
+    muteList.add(player);
+    console.log(`[MOD] Muted ${player}. Reason: ${safeReason}`);
+    
+    if (CONFIG.testMode) {
+      setTimeout(() => { bot.chat(`/unmute ${player}`); }, 500);
+    } else {
+      setTimeout(() => muteList.delete(player), duration * 60 * 1000);
+    }
+  } else if (action === 'kick') {
+    bot.chat(`/kick ${player} ${safeReason}`);
+    console.log(`[MOD] Kicked ${player}. Reason: ${safeReason}`);
+  }
+}
+
+async function processBackgroundQueue() {
+  if (isProcessingQueue || modQueue.length === 0) return;
+  isProcessingQueue = true;
+
+  while (modQueue.length > 0) {
+    const task = modQueue[0]; // Peek
+    console.log(`[Queue] Processing background check for ${task.sender}...`);
+
+    try {
+      const check = await checkProfanity(task.message, true); // true = use background key
+      if (check.isViolation) {
+        punish(task.sender, 'mute', `Delayed Mod Review - Toxic behavior detected`);
+      }
+      modQueue.shift(); // Success, remove from queue
+    } catch (err) {
+      console.log(`[Queue] Background key also exhausted. Retrying later.`);
+      break; // Stop processing and wait for next interval
+    }
+    
+    await new Promise(res => setTimeout(res, 2000)); // Respectful delay between background checks
+  }
+  
+  isProcessingQueue = false;
+}
+setInterval(processBackgroundQueue, 5000);
+
 async function checkViolation(sender, message) {
-  // Hardcoded regex block
   const SEVERE_SLURS = [
-    /\bn[i1@]+gg[ae3@]+r\b/i,
-    /\bf[a@4]+gg[o0@]+t\b/i,
-    /\bc[u\*@]+nt\b/i,
-    /\b(kys|kill.{0,2}yourself)\b/i,
-    /\bf[u\*@]+c[k\*@]+/i,          
-    /\bb[i1\*@]+t[c\*@]+h/i,        
-    /\bwh[o0\*@]+r[e3\*@]+/i,       
-    /\bsh[i1\*@]+t\b/i              
+    /\bn[i1@]+gg[ae3@]+r\b/i, /\bf[a@4]+gg[o0@]+t\b/i, /\bc[u\*@]+nt\b/i,
+    /\b(kys|kill.{0,2}yourself)\b/i, /\bf[u\*@]+c[k\*@]+/i,          
+    /\bb[i1\*@]+t[c\*@]+h/i, /\bwh[o0\*@]+r[e3\*@]+/i, /\bsh[i1\*@]+t\b/i              
   ];
 
   for (const pattern of SEVERE_SLURS) {
     if (pattern.test(message)) {
-      console.log(`[MOD] Severe Hardcoded Violation: ${sender}`);
-      mute(sender, `Profanity detected - "${message}"`);
+      punish(sender, 'mute', `Severe Rule Violation`);
       return true;
     }
   }
 
-  // AI check
-  const aiCheck = await checkProfanity(message);
-  if (aiCheck.isProfane) {
-    console.log(`[MOD] AI flagged profanity: ${sender}`);
-    mute(sender, `Profanity detected - "${message}"`);
-    return true;
+  try {
+    const aiCheck = await checkProfanity(message, false);
+    if (aiCheck.isViolation) {
+      punish(sender, 'mute', `Toxicity/Violation detected`);
+      return true;
+    }
+  } catch (err) {
+    if (err.message === 'RATE_LIMIT_EXHAUSTED') {
+      console.log(`[MOD] Primary keys exhausted. Queueing message from ${sender} for background review.`);
+      modQueue.push({ sender, message });
+    }
   }
-
   return false;
 }
+
+// ========================
+// INVESTIGATION LOGIC
+// ========================
+async function runInvestigation(target) {
+  if (!target) return say("You need to tell me who to investigate! (e.g. !investigate Player123)");
+  
+  say(`[Investigation] Reviewing the global event log for ${target}...`);
+  
+  const historyText = globalHistory.join('\n');
+  
+  const prompt = `You are a Minecraft Server Admin. Review the recent server event log provided below to investigate the player named "${target}".
+  
+Look for:
+- Random Deathmatching (RDM): The target killing multiple people without context.
+- Toxicity/Harassment: The target harassing, bullying, or targeting someone in chat.
+- Spam: The target flooding the chat.
+
+Respond STRICTLY in JSON format:
+{
+  "guilty": true or false,
+  "action": "kick" or "mute" or "none",
+  "reason": "Brief 5-word reason for punishment"
+}
+
+Event Log:
+${historyText}`;
+
+  try {
+    const response = await callGroq([{ role: 'user', content: prompt }], 100, 0.2, CONFIG.models.chat, 'chat');
+    
+    // Extract JSON from response
+    const jsonMatch = response.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const data = JSON.parse(jsonMatch[0]);
+      if (data.guilty && data.action !== 'none') {
+        say(`[Investigation Completed] Action taken against ${target}. Reason: ${data.reason}`);
+        punish(target, data.action, `Investigation: ${data.reason}`);
+      } else {
+        say(`[Investigation Completed] ${target} appears to be innocent or there isn't enough evidence.`);
+      }
+    } else {
+      say(`[Investigation] AI failed to format the review properly.`);
+    }
+  } catch (err) {
+    say(`[Investigation Failed] Systems are currently overloaded.`);
+  }
+}
+
 
 // ========================
 // AI RESPONSE
@@ -322,44 +397,26 @@ async function getAIResponse(message, sender) {
 COMMUNICATION STYLE:
 - NEVER WRITE PARAGRAPHS. You must keep your responses to EXACTLY 1 or 2 short sentences. MAXIMUM 15 WORDS TOTAL.
 - Sound entirely human, warm, and natural. Use contractions (I'm, you're, that's) to maintain conversational flow.
-- Maintain polished, flawless grammar and spelling. Be the most articulate person in the room.
-- Completely avoid robotic customer service jargon. Never use mechanical phrases like "How may I assist you today?" or "Please be advised."
-
-SPECIFIC SCENARIOS:
-- If players act chaotic, toxic, or beg for things (like money/items): Respond with polite, calm boundaries or mild, professional amusement. (e.g., "I'm afraid I can't help with that," or "Let's keep things civil, please.")
-- If someone accuses you of being an AI or a bot: Deflect with polite, natural humor. (e.g., "I'm just a very fast typer," or "I assure you, I'm a regular person.")
-- If asked about complex math or coding: Politely decline in a human way. (e.g., "I'm here to play, not to do homework!")
 
 STRICT RULES:
 - Never output Minecraft commands (like /spawn).
-- Never admit you are an AI or a language model. 
-- If you notice the user's message contains severe profanity or slurs that might have been missed by the filter, start your response EXACTLY with "[ALERT]". Otherwise, reply normally.`;
+- Never admit you are an AI or a language model.`;
     
-  const response = await callGroq(
-    [
-      { role: 'system', content: system },
-      { role: 'user', content: `${sender}: ${message}\n${memory}` }
-    ],
-    40, 
-    0.7,
-    CONFIG.models.chat,
-    'chat' 
-  );
-
-  if (!response) return null; 
-
-  if (response.startsWith('[ALERT]')) {
-    console.log(`[Alert] Conversational model flagged missed profanity from ${sender}`);
-    const secondCheck = await checkProfanity(message);
-    if (secondCheck.isProfane) {
-      mute(sender, `Profanity detected - "${message}"`);
-    } else {
-      mute(sender, `Missed profanity Alert - "${message}"`);
-    }
-    return response.replace('[ALERT]', '').trim();
+  try {
+      const response = await callGroq(
+        [
+          { role: 'system', content: system },
+          { role: 'user', content: `${sender}: ${message}\n${memory}` }
+        ],
+        40, 
+        0.7,
+        CONFIG.models.chat,
+        'chat' 
+      );
+      return response;
+  } catch (err) {
+      return null;
   }
-
-  return response;
 }
 
 // ========================
@@ -370,46 +427,26 @@ function handleBangCommand(sender, msg) {
   const cmd = args[0].toLowerCase();
 
   switch (cmd) {
+    case 'investigate':
+      runInvestigation(args[1]);
+      break;
     case 'inventory':
       const items = bot.inventory.items().map(i => `${i.name}: ${i.count}`).join(', ');
       say(`Inventory: ${items || 'empty'}`);
       break;
     case 'status':
-      say(`Health: ${Math.round(bot.health)}/${bot.maxHealth}, Food: ${bot.food}/20`);
+      say(`Health: ${Math.round(bot.health)}/${bot.maxHealth}`);
       break;
     case 'help':
-      say('Commands: !inventory, !status, !joke, !roll, !fact, !testkeys, !mute <player> [reason], !kick <player> [reason]');
-      break;
-    case 'joke':
-      getAIResponse('Tell me a short, clean joke about Minecraft.', sender).then(r => r && say(r));
-      break;
-    case 'roll':
-      const sides = parseInt(args[1]) || 6;
-      const roll = Math.floor(Math.random() * sides) + 1;
-      say(`🎲 Rolled: ${roll}/${sides}`);
-      break;
-    case 'fact':
-      getAIResponse('Tell me an interesting Minecraft fact.', sender).then(r => r && say(r));
-      break;
-    case 'testkeys':
-      if (sender !== 'Terminal' && !CONFIG.moderation.moderators.includes(sender)) { 
-        say('Permission denied.'); 
-        return; 
-      }
-      say('Testing API keys... Check terminal for results.');
-      testAllApiKeys();
+      say('Commands: !investigate <player>, !inventory, !status, !mute, !kick');
       break;
     case 'mute':
       if (!CONFIG.moderation.moderators.includes(sender)) { say('Permission denied.'); return; }
-      const target = args[1];
-      const reason = args.slice(2).join(' ') || 'Chat violation';
-      if (target) mute(target, reason);
+      if (args[1]) punish(args[1], 'mute', args.slice(2).join(' ') || 'Manual Mod Action');
       break;
     case 'kick':
       if (!CONFIG.moderation.moderators.includes(sender)) { say('Permission denied.'); return; }
-      const kickTarget = args[1];
-      const kickReason = args.slice(2).join(' ') || 'Rule violation';
-      if (kickTarget) bot.chat(`/kick ${kickTarget} ${kickReason}`);
+      if (args[1]) punish(args[1], 'kick', args.slice(2).join(' ') || 'Manual Mod Action');
       break;
     default:
       say(`Unknown command: ${cmd}`);
@@ -437,14 +474,6 @@ function createBot() {
     isInGame = true;
     const mcData = require('minecraft-data')(bot.version);
     bot.pathfinder.setMovements(new Movements(bot, mcData));
-
-    setInterval(() => {
-      if (!bot.entity || !isInGame) return;
-      if (Math.random() < 0.1) {
-        bot.setControlState('jump', true);
-        setTimeout(() => bot.setControlState('jump', false), 300);
-      }
-    }, 8000);
   });
 
   bot.on('end', () => {
@@ -454,64 +483,47 @@ function createBot() {
     setTimeout(createBot, 5000);
   });
 
-  bot.on('error', (err) => console.log(`[Error] ${err.message}`));
-  bot.on('kicked', (reason) => console.log(`[Kicked] ${reason}`));
-
   bot.on('message', async (jsonMsg) => {
     const text = jsonMsg.toString().trim();
     if (!text || text.length > 500) return;
 
     const lower = text.toLowerCase();
-    
     if (lower.includes('ignoring block entities')) return;
+
+    // Log EVERYTHING to global history for investigations before the bot ignores it
+    logGlobalEvent(text);
 
     console.log(`[Server] ${text}`);
 
     if (!isLoggedIn && lower.includes('/login')) {
-      console.log('[Bot] Auto-logging in...');
       say('/login 551417114');
       isLoggedIn = true;
       return;
     }
 
     if (lower.includes('successfully logged')) isLoggedIn = true;
-    if (lower.includes('[+] habibi') || (lower.includes('joined the game') && lower.includes('habibi'))) {
-      isInGame = true;
-    }
-    if (lower.includes('limbo') || lower.includes('queue')) isInGame = false;
-
-    if (lower.includes('teleport to you')) {
-      setTimeout(() => bot.chat('/tpaccept'), 1000);
-      return;
-    }
+    if (lower.includes('[+] habibi')) isInGame = true;
+    if (lower.includes('teleport to you')) { setTimeout(() => bot.chat('/tpaccept'), 1000); return; }
 
     const isServerMessage = /^\[(Server|INFO|WARN|ERROR|System)\]/i.test(text) ||
-                            /^\*{3}/.test(text) ||
-                            /^\[[+\-]\]/.test(text) ||
+                            /^\*{3}/.test(text) || /^\[[+\-]\]/.test(text) ||
                             /(joined|left) the game/i.test(text) ||
-                            /(time|seconds|queue|position|limbo|lifesteal|full|estimated)/i.test(text) ||
                             /(tempmuted|unmuted|muted|banned|kicked)/i.test(text) ||
-                            /^Habibi/i.test(text) ||
-                            /\[Spartan Notification\]/i.test(text) ||
-                            /Welcome back!/i.test(text);
+                            /^Habibi/i.test(text);
     if (isServerMessage) return;
 
     let sender = null;
     let message = null;
 
     const cleanText = text.replace(/^(?:\[[^\]]+\]\s*)*(?:MOD|HELPER|SRHELPER|OWNER|ADMIN|COOWNER|BUILDER|VIP|MVP|YOUTUBE)\s+/i, '');
-
     const match1 = cleanText.match(/^([a-zA-Z0-9_]{3,16})\s*[:»\-]\s*(.+)/);
+    
     if (match1) {
       sender = match1[1];
       message = match1[2];
-    }
-
-    if (!sender && text.includes(':')) {
+    } else if (text.includes(':')) {
       const parts = text.split(':');
-      const beforeColon = parts[0].replace(/^\[.*?\]\s*/, '').trim();
-      const words = beforeColon.split(/\s+/);
-      const possibleSender = words[words.length - 1];
+      const possibleSender = parts[0].replace(/^\[.*?\]\s*/, '').trim().split(/\s+/).pop();
       if (possibleSender && possibleSender.length >= 3 && possibleSender.length <= 16 && /^[a-zA-Z0-9_]+$/.test(possibleSender)) {
         sender = possibleSender;
         message = parts.slice(1).join(':').trim();
@@ -520,12 +532,7 @@ function createBot() {
 
     if (!sender || !message || sender === 'Habibi' || sender === 'detected') return;
     
-    if (message.length < 2 || message.match(/^\d+\s+seconds$/i)) return;
-
-    if (muteList.has(sender)) {
-      muteList.delete(sender);
-      console.log(`[MOD] ${sender} spoke in chat. Cleared from internal mute list.`);
-    }
+    if (muteList.has(sender)) muteList.delete(sender);
 
     console.log(`[Chat] ${sender}: ${message}`);
     addMemory(sender, message);
@@ -533,6 +540,15 @@ function createBot() {
     if (isInGame) {
       const violated = await checkViolation(sender, message);
       if (violated) return;
+    }
+
+    if (message.toLowerCase().includes('investigate')) {
+        const parts = message.split(' ');
+        const targetIdx = parts.findIndex(w => w.toLowerCase() === 'investigate') + 1;
+        if (parts[targetIdx]) {
+            runInvestigation(parts[targetIdx]);
+            return;
+        }
     }
 
     const mentioned = message.toLowerCase().includes('habibi');
@@ -554,53 +570,7 @@ function createBot() {
       }
     }
   });
-
-  bot.on('health', () => {
-    if (bot.food < 14) {
-      const food = bot.inventory.items().find(item =>
-        item.name.includes('apple') || item.name.includes('bread') ||
-        item.name.includes('carrot') || item.name.includes('beef')
-      );
-      if (food) {
-        bot.equip(food, 'hand');
-        bot.activateItem();
-      }
-    }
-  });
-
-  bot.on('windowOpen', async (window) => {
-    await new Promise(r => setTimeout(r, 500));
-    if (bot.currentWindow) bot.clickWindow(1, 0, 0);
-  });
 }
-
-// ========================
-// TERMINAL INPUT
-// ========================
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-  prompt: 'Habibi> ',
-});
-
-rl.prompt();
-rl.on('line', (line) => {
-  const msg = line.trim();
-  if (msg.startsWith('!')) {
-    handleBangCommand('Terminal', msg);
-  } else if (msg.startsWith('/')) {
-    if (bot) bot.chat(msg);
-  } else if (msg) {
-    say(msg);
-  }
-  rl.prompt();
-});
-
-rl.on('close', () => {
-  console.log('[Bot] Shutting down...');
-  if (bot) bot.quit();
-  process.exit(0);
-});
 
 // ========================
 // START
