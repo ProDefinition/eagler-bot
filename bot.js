@@ -46,7 +46,7 @@ const CONFIG = {
     cooldown: 1000,   
     max_length: 250,  
   },
-  testMode: true,   
+  testMode: false,   
 };
 
 // ========================
