@@ -36,6 +36,7 @@ const CONFIG = {
 let bot = null;
 let isInGame = false;
 let isLoggedIn = false;
+let isReady = false; // <-- NEW: Prevents AI from firing before system checks pass
 
 // Agent's short-term memory to understand context
 const chatHistory = [];
@@ -78,7 +79,6 @@ async function processModQueue() {
   while (modQueue.length > 0) {
     const item = modQueue[0];
 
-    // Build the context string
     const contextStr = chatHistory.map(msg => `[${msg.time}] ${msg.sender}: ${msg.message}`).join('\n');
     
     try {
@@ -88,19 +88,16 @@ async function processModQueue() {
           { role: 'user', content: `CHAT HISTORY:\n${contextStr || 'No prior history.'}\n\nINVESTIGATE THIS MESSAGE:\nSender: ${item.sender}\nMessage: "${item.message}"` }
         ],
         model: CONFIG.groq.model,
-        temperature: 0.1, // Low temp for highly logical decisions
-        max_tokens: 150,  // Enough for the JSON payload
+        temperature: 0.1, 
+        max_tokens: 150,  
       });
 
       let reply = response.choices[0]?.message?.content?.trim() || '{}';
-      
-      // Cleanup: Strip markdown block if the LLM adds it (e.g., ```json ... ```)
       reply = reply.replace(/^```json/i, '').replace(/```$/, '').trim();
 
       try {
         const decision = JSON.parse(reply);
         
-        // Execute the Agent's decision
         if (decision.action !== 'NONE') {
           console.log(`[Agent] Decision for ${item.sender}:`, decision);
           
@@ -125,7 +122,7 @@ async function processModQueue() {
       }
 
       modQueue.shift(); 
-      await new Promise(r => setTimeout(r, 800)); // Rate limit buffer
+      await new Promise(r => setTimeout(r, 800)); 
 
     } catch (error) {
       if (error.status === 429) {
@@ -178,10 +175,40 @@ function createBot() {
     version: CONFIG.server.version,
   });
 
-  bot.once('spawn', () => {
-    console.log('[Bot] Spawned! Agentic moderation active.');
+  bot.once('spawn', async () => {
+    console.log('[Bot] Entity spawned. Initiating pre-flight checks...');
     isInGame = true;
 
+    // 1. Wait a moment for chunks and potential login prompts to appear
+    await new Promise(r => setTimeout(r, 2000));
+
+    // 2. Wait for authentication to finish
+    if (!isLoggedIn) {
+      console.log('[System] Waiting for authentication...');
+      let attempts = 0;
+      while (!isLoggedIn && attempts < 15) {
+          await new Promise(r => setTimeout(r, 1000));
+          attempts++;
+      }
+    }
+
+    // 3. Test Physical Sync
+    console.log('[System] Testing server sync (Movement)...');
+    bot.setControlState('jump', true);
+    await new Promise(r => setTimeout(r, 300));
+    bot.setControlState('jump', false);
+
+    // 4. Test Data Sync
+    console.log(`[System] Testing server sync (Data)... Health: ${bot.health}, Food: ${bot.food}`);
+
+    // 5. Purge the MOTD buffer
+    console.log('[System] Purging startup chat buffer (Waiting 3s)...');
+    await new Promise(r => setTimeout(r, 3000));
+
+    console.log('[System] >>> ALL CHECKS PASSED. MODERATION AGENT ARMED. <<<');
+    isReady = true;
+
+    // Anti-AFK jump
     setInterval(() => {
       if (!bot.entity || !isInGame) return;
       if (Math.random() < 0.1) {
@@ -195,6 +222,7 @@ function createBot() {
     console.log('[Bot] Disconnected. Reconnecting in 5s...');
     isInGame = false;
     isLoggedIn = false;
+    isReady = false;
     setTimeout(createBot, 5000);
   });
 
@@ -209,10 +237,10 @@ function createBot() {
     
     if (lower.includes('ignoring block entities')) return;
 
+    // Handle Login logic regardless of ready state
     if (!isLoggedIn && lower.includes('/login')) {
       console.log('[Bot] Auto-logging in...');
       say('/login 551417114');
-      isLoggedIn = true;
       return;
     }
 
@@ -221,6 +249,10 @@ function createBot() {
       isInGame = true;
     }
     if (lower.includes('limbo') || lower.includes('queue')) isInGame = false;
+
+    // >>> THE GATEKEEPER <<<
+    // Ignore all general chat and moderation duties until system checks pass
+    if (!isReady) return;
 
     if (lower.includes('teleport to you')) {
       setTimeout(() => bot.chat('/tpaccept'), 1000);
@@ -262,7 +294,6 @@ function createBot() {
     if (!sender || !message || sender === CONFIG.server.username || sender === 'detected') return;
     if (message.length < 2 || message.match(/^\d+\s+seconds$/i)) return;
 
-    // Log the parsed chat
     console.log(`[Chat] ${sender}: ${message}`);
 
     // Push to agent's memory
@@ -279,6 +310,7 @@ function createBot() {
   });
 
   bot.on('health', () => {
+    if (!isReady) return; // Don't try to eat while booting up
     if (bot.food < 14) {
       const food = bot.inventory.items().find(item =>
         item.name.includes('apple') || item.name.includes('bread') ||
