@@ -24,8 +24,8 @@ const CONFIG = {
     max_length: 250,  
   },
   groq: {
-    apiKey: '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', // <-- API KEY
-    model: 'openai/gpt-oss-20b',          // Valid Groq model for fast, logical reasoning
+    apiKey: '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', 
+    model: 'openai/gpt-oss-20b',      // Restored to your correct model
     maxQueueSize: 100                 
   }
 };
@@ -234,11 +234,11 @@ function createBot() {
   });
 
   bot.on('end', () => {
-    console.log('[Bot] Disconnected. Reconnecting in 5s...');
+    console.log('[Bot] Disconnected. Waiting 15s for server to clear ghost session...');
     isInGame = false;
     isLoggedIn = false;
     isReady = false;
-    setTimeout(createBot, 5000);
+    setTimeout(createBot, 15000); // 15s delay to fix ghost player glitch
   });
 
   bot.on('error', (err) => console.log(`[Error] ${err.message}`));
@@ -339,6 +339,18 @@ function createBot() {
 }
 
 // ========================
+// GRACEFUL SHUTDOWN
+// ========================
+function shutdown() {
+  console.log('\n[System] Shutting down gracefully. Disconnecting bot...');
+  if (bot) bot.quit(); // Force close the connection so the server clears the ghost
+  setTimeout(() => process.exit(0), 500); 
+}
+
+process.on('SIGINT', shutdown);  
+process.on('SIGTERM', shutdown); 
+
+// ========================
 // TERMINAL INPUT
 // ========================
 const rl = readline.createInterface({
@@ -359,9 +371,7 @@ rl.on('line', (line) => {
 });
 
 rl.on('close', () => {
-  console.log('[Bot] Shutting down...');
-  if (bot) bot.quit();
-  process.exit(0);
+  shutdown();
 });
 
 // ========================
