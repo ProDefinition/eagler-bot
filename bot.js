@@ -25,7 +25,7 @@ const CONFIG = {
   },
   groq: {
     apiKey: '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', // <-- API KEY
-    model: 'openai/gpt-oss-20b',      
+    model: 'llama3-8b-8192',          // Valid Groq model for fast, logical reasoning
     maxQueueSize: 100                 
   }
 };
@@ -41,7 +41,7 @@ let isReady = false;
 // Agent's memory
 const chatHistory = [];
 const MAX_HISTORY = 15; 
-const warnedPlayers = new Set(); // <-- NEW: Tracks who has already been warned
+const warnedPlayers = new Set(); // Tracks who has already been warned
 
 // ========================
 // GROQ MODERATION QUEUE
@@ -50,25 +50,26 @@ const groq = new Groq({ apiKey: CONFIG.groq.apiKey });
 const modQueue = [];
 let isProcessingQueue = false;
 
+// STRICT ZERO-TOLERANCE PROMPT
 const SYSTEM_PROMPT = `
-You are an autonomous AI moderator for a Minecraft server.
-You will be provided with recent chat history and a specific message to evaluate.
+You are a ZERO-TOLERANCE, strict AI moderator for a Minecraft server.
+You will evaluate the provided chat message.
 
-Your job is to INVESTIGATE the context. 
-- Differentiate between harmless in-game banter (e.g., "kill the skeleton", "I died to lava damnit") and actual hostility/toxicity against players.
-- Differentiate between mild annoyance and severe harassment/slurs.
+RULES:
+- ANY profanity (e.g., "fuck", "shit", "bitch"), regardless of context or if it is "harmless banter", is strictly forbidden.
+- You must punish ALL swearing, toxicity, or spam.
 
 Choose the appropriate action:
-- NONE: The message is clean, harmless, or just mild frustration not directed maliciously.
-- WARN: Mild profanity directed at someone, spam, or borderline behavior.
-- MUTE: Severe profanity, slurs, heavy toxicity, or repeated hostility.
+- NONE: The message is 100% clean and contains no profanity.
+- WARN: Any standard profanity, mild toxicity, or spam.
+- MUTE: Severe slurs, bypass attempts, or heavy harassment.
 - KICK: Extreme violations (e.g., threats, extreme hate speech).
 
 You MUST respond strictly in valid JSON format. Do not include markdown formatting or extra text.
 {
   "action": "NONE" | "WARN" | "MUTE" | "KICK",
   "target": "username of offender",
-  "duration": "10m" (only required if action is MUTE, e.g., 5m, 30m, 1h),
+  "duration": "10m" (only required if action is MUTE),
   "reason": "Brief, professional reason for the punishment"
 }
 `;
@@ -85,10 +86,10 @@ async function processModQueue() {
       const response = await groq.chat.completions.create({
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: `CHAT HISTORY:\n${contextStr || 'No prior history.'}\n\nINVESTIGATE THIS MESSAGE:\nSender: ${item.sender}\nMessage: "${item.message}"` }
+          { role: 'user', content: `CHAT HISTORY:\n${contextStr || 'No prior history.'}\n\nEVALUATE THIS MESSAGE:\nSender: ${item.sender}\nMessage: "${item.message}"` }
         ],
         model: CONFIG.groq.model,
-        temperature: 0.1, 
+        temperature: 0.0, // Zero variance, strictly factual decisions
         max_tokens: 150,  
       });
 
@@ -102,18 +103,20 @@ async function processModQueue() {
           console.log(`[Agent] Decision for ${item.sender}:`, decision);
           
           const target = decision.target || item.sender;
-          const reason = decision.reason ? `AutoMod: ${decision.reason}` : `AutoMod: Policy violation`;
+          // Ensure reasons don't trigger anti-caps plugins
+          const reason = decision.reason ? `Automod: ${decision.reason}` : `Automod: Policy violation`;
           
           switch (decision.action.toUpperCase()) {
             case 'WARN':
-              // Hardcoded Strike System: Override the AI if they are already warned
               if (warnedPlayers.has(target)) {
-                say(`/tempmute ${target} 10m ${reason} (Repeated violations after warning)`);
+                // Strike 2: Instant Mute
+                say(`/tempmute ${target} 10m ${reason} (Ignored Warning)`);
                 console.log(`[System] Escalated ${target} to MUTE. They ignored their first warning.`);
               } else {
+                // Strike 1: Warning
                 warnedPlayers.add(target);
-                // Public ping to guarantee they see it
-                say(`${target}, WARNING: ${reason}. Your next offense will result in an auto-mute.`);
+                // Lowercase formatting to bypass aggressive anti-caps plugins
+                say(`${target}, warning: ${reason}. next offense is a mute.`);
                 console.log(`[System] Issued first warning to ${target}.`);
               }
               break;
@@ -154,21 +157,30 @@ function say(text) {
   if (!bot || !text) return;
   text = text.replace(/[\n\r]/g, ' ').trim();
   
-  if (text.length <= CONFIG.chat.max_length) {
-    console.log(`[Say] ${text}`);
-    bot.chat(text);
-    return;
-  }
+  // Slight delay before sending to avoid triggering the server's anti-spam
+  setTimeout(() => {
+    if (text.length <= CONFIG.chat.max_length) {
+      console.log(`[Say] ${text}`);
+      bot.chat(text);
+      return;
+    }
 
-  let remaining = text;
-  while (remaining.length > 0) {
-    let chunk = remaining.slice(0, CONFIG.chat.max_length);
-    const lastSpace = chunk.lastIndexOf(' ');
-    if (lastSpace > CONFIG.chat.max_length / 2) chunk = chunk.slice(0, lastSpace);
-    console.log(`[Say] ${chunk}`);
-    bot.chat(chunk);
-    remaining = remaining.slice(chunk.length).trim();
-  }
+    let remaining = text;
+    let delay = 0;
+    while (remaining.length > 0) {
+      let chunk = remaining.slice(0, CONFIG.chat.max_length);
+      const lastSpace = chunk.lastIndexOf(' ');
+      if (lastSpace > CONFIG.chat.max_length / 2) chunk = chunk.slice(0, lastSpace);
+      
+      setTimeout(() => {
+        console.log(`[Say] ${chunk}`);
+        bot.chat(chunk);
+      }, delay);
+      
+      delay += 500; // 500ms between long message chunks
+      remaining = remaining.slice(chunk.length).trim();
+    }
+  }, 250);
 }
 
 // ========================
