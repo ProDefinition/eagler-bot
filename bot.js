@@ -449,11 +449,13 @@ function createBot() {
     }
 
     // Enhanced server message filtering
+    // Enhanced server message filtering
     const isServerMessage = /^\[(Server|INFO|WARN|ERROR|System)\]/.test(text) ||
                             /^\*{3}/.test(text) ||
                             /^\[[+\-]\]/.test(text) ||
                             /(joined|left) the game/.test(text) ||
                             /(time|seconds|queue|position|limbo|lifesteal|full|estimated)/i.test(text) ||
+                            /Habibi (tempmuted|unmuted|muted)/i.test(text) || // 🛑 ADD THIS LINE TO FIX THE LOOP
                             /\[Spartan Notification\]/.test(text) ||
                             /Welcome back!/.test(text);
     if (isServerMessage) return;
