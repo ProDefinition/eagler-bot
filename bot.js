@@ -1,5 +1,6 @@
 const mineflayer = require('mineflayer');
 const readline = require('readline');
+const { Groq } = require('groq-sdk');
 
 // Catch log, warn, and error to ensure the chunk spam is completely muted.
 ['log', 'warn', 'error'].forEach((method) => {
@@ -21,6 +22,11 @@ const CONFIG = {
   },
   chat: {
     max_length: 250,  
+  },
+  groq: {
+    apiKey: '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', // <-- INSERT YOUR KEY HERE
+    model: 'openai/gpt-oss-20b',          // Fast model for quick yes/no classification
+    muteDuration: '10m',              // Default mute duration
   }
 };
 
@@ -30,6 +36,71 @@ const CONFIG = {
 let bot = null;
 let isInGame = false;
 let isLoggedIn = false;
+
+// ========================
+// GROQ MODERATION QUEUE
+// ========================
+const groq = new Groq({ apiKey: CONFIG.groq.apiKey });
+const modQueue = [];
+let isProcessingQueue = false;
+
+async function processModQueue() {
+  if (isProcessingQueue || modQueue.length === 0) return;
+  isProcessingQueue = true;
+
+  while (modQueue.length > 0) {
+    const item = modQueue[0];
+
+    try {
+      const response = await groq.chat.completions.create({
+        messages: [
+          {
+            role: 'system',
+            content: 'You are a strict chat moderator. Respond ONLY with "YES" if the message contains profanity, slurs, or severe toxicity. Respond ONLY with "NO" if the message is clean.'
+          },
+          {
+            role: 'user',
+            content: `Message: "${item.message}"`
+          }
+        ],
+        model: CONFIG.groq.model,
+        temperature: 0, // Strict, deterministic output
+        max_tokens: 5,  // We only need a yes/no
+      });
+
+      const reply = response.choices[0]?.message?.content?.trim().toUpperCase() || 'NO';
+
+      if (reply.includes('YES')) {
+        // Truncate the message so the /tempmute command doesn't exceed Minecraft's max length
+        const safeMessage = item.message.length > 50 ? item.message.substring(0, 47) + '...' : item.message;
+        const muteCommand = `/tempmute ${item.sender} ${CONFIG.groq.muteDuration} Auto-Mod Profanity: ${safeMessage}`;
+        
+        say(muteCommand);
+        console.log(`[Moderation] Muted ${item.sender}. Reason: Profanity detected by AI.`);
+      }
+
+      // Successfully processed, remove from queue
+      modQueue.shift(); 
+      
+      // Small artificial delay to be kind to the API, adjust as needed
+      await new Promise(r => setTimeout(r, 500)); 
+
+    } catch (error) {
+      if (error.status === 429) {
+        // Rate Limit Hit
+        console.warn('[Moderation] Groq Rate limit hit! Pausing queue for 10 seconds...');
+        await new Promise(r => setTimeout(r, 10000));
+        // We DO NOT shift the array here, so the message stays in the queue to be retried
+      } else {
+        // Other errors (Network, Auth, etc.)
+        console.error(`[Moderation] API Error: ${error.message}`);
+        modQueue.shift(); // Drop the message so the queue doesn't get permanently stuck
+      }
+    }
+  }
+
+  isProcessingQueue = false;
+}
 
 // ========================
 // UTILITIES
@@ -129,8 +200,6 @@ function createBot() {
     
     if (lower.includes('ignoring block entities')) return;
 
-    console.log(`[Server] ${text}`);
-
     if (!isLoggedIn && lower.includes('/login')) {
       console.log('[Bot] Auto-logging in...');
       say('/login 551417114');
@@ -184,10 +253,15 @@ function createBot() {
     }
 
     if (!sender || !message || sender === 'Habibi' || sender === 'detected') return;
-    
     if (message.length < 2 || message.match(/^\d+\s+seconds$/i)) return;
 
     console.log(`[Chat] ${sender}: ${message}`);
+
+    // Queue message for AI moderation (ignores commands to prevent recursive loops)
+    if (!message.startsWith('!')) {
+      modQueue.push({ sender, message });
+      processModQueue();
+    }
 
     // Handle standard commands
     if (message.startsWith('!')) {
