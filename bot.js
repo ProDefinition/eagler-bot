@@ -38,6 +38,12 @@ const chatHistory = [];
 const MAX_HISTORY = 15; 
 const warnedPlayers = new Set(); 
 
+// Smart Caching & Rate Limiting State
+const modCache = new Map(); 
+const modTimestamps = [];
+const chatTimestamps = [];
+const MAX_RPM = 28; // Keeps you safely under the standard 30 RPM Groq limit
+
 const groq = new Groq({ apiKey: CONFIG.groq.apiKey });
 const chatGroq = new Groq({ apiKey: CONFIG.groq.chatApiKey });
 
@@ -84,12 +90,69 @@ RULES:
 - Address players by name.
 `;
 
+async function enforceRateLimit(timestampsArray) {
+  const now = Date.now();
+  while (timestampsArray.length > 0 && now - timestampsArray[0] > 60000) {
+    timestampsArray.shift();
+  }
+
+  if (timestampsArray.length >= MAX_RPM) {
+    const waitTime = 60000 - (now - timestampsArray[0]) + 100;
+    console.log(`[Rate Limit] Approaching RPM limit. Dynamic throttle paused queue for ${waitTime}ms.`);
+    await new Promise(r => setTimeout(r, waitTime));
+    return enforceRateLimit(timestampsArray); 
+  }
+
+  timestampsArray.push(Date.now());
+}
+
+function handlePunishment(decision, target) {
+  if (decision.action === 'NONE') return;
+  
+  const reason = decision.reason ? `Automod: ${decision.reason}` : `Automod: Policy violation`;
+  
+  switch (decision.action.toUpperCase()) {
+    case 'WARN':
+      if (warnedPlayers.has(target)) {
+        say(`/tempmute ${target} 10m ${reason} (Ignored Warning)`);
+        console.log(`[System] Escalated ${target} to MUTE.`);
+      } else {
+        warnedPlayers.add(target);
+        say(`${target}, warning: ${reason}. next offense is a mute.`);
+        console.log(`[System] Issued first warning to ${target}.`);
+      }
+      break;
+    case 'MUTE':
+      const duration = decision.duration || '10m';
+      say(`/tempmute ${target} ${duration} ${reason}`);
+      break;
+    case 'KICK':
+      say(`/kick ${target} ${reason}`);
+      break;
+  }
+}
+
 async function processModQueue() {
   if (isProcessingQueue || modQueue.length === 0) return;
   isProcessingQueue = true;
 
   while (modQueue.length > 0) {
     const item = modQueue[0];
+    const msgLower = item.message.toLowerCase();
+
+    if (msgLower.length < 3) {
+      modQueue.shift();
+      continue;
+    }
+
+    if (modCache.has(msgLower)) {
+      handlePunishment(modCache.get(msgLower), item.sender);
+      modQueue.shift();
+      continue;
+    }
+
+    await enforceRateLimit(modTimestamps);
+
     const contextStr = chatHistory.map(msg => `[${msg.time}] ${msg.sender}: ${msg.message}`).join('\n');
     
     try {
@@ -105,7 +168,6 @@ async function processModQueue() {
 
       let reply = response.choices[0]?.message?.content?.trim() || '{}';
       
-      // Forces extraction of purely the JSON object, ignoring any markdown or conversational filler
       const startIdx = reply.indexOf('{');
       const endIdx = reply.lastIndexOf('}');
       if (startIdx !== -1 && endIdx !== -1) {
@@ -115,42 +177,19 @@ async function processModQueue() {
       try {
         const decision = JSON.parse(reply);
         
-        if (decision.action !== 'NONE') {
-          console.log(`[Agent] Decision for ${item.sender}:`, decision);
-          
-          const target = decision.target || item.sender;
-          const reason = decision.reason ? `Automod: ${decision.reason}` : `Automod: Policy violation`;
-          
-          switch (decision.action.toUpperCase()) {
-            case 'WARN':
-              if (warnedPlayers.has(target)) {
-                say(`/tempmute ${target} 10m ${reason} (Ignored Warning)`);
-                console.log(`[System] Escalated ${target} to MUTE.`);
-              } else {
-                warnedPlayers.add(target);
-                say(`${target}, warning: ${reason}. next offense is a mute.`);
-                console.log(`[System] Issued first warning to ${target}.`);
-              }
-              break;
-            case 'MUTE':
-              const duration = decision.duration || '10m';
-              say(`/tempmute ${target} ${duration} ${reason}`);
-              break;
-            case 'KICK':
-              say(`/kick ${target} ${reason}`);
-              break;
-          }
-        }
+        if (modCache.size > 1000) modCache.clear();
+        modCache.set(msgLower, decision);
+
+        handlePunishment(decision, decision.target || item.sender);
       } catch (parseError) {
         console.error(`[Moderation] Agent returned invalid JSON:`, reply);
       }
 
       modQueue.shift(); 
-      await new Promise(r => setTimeout(r, 800)); 
 
     } catch (error) {
       if (error.status === 429) {
-        console.warn(`[Moderation] Rate limit hit! Pausing for 10s...`);
+        console.warn(`[Moderation] Rate limit hit despite throttling! Hard pausing for 10s...`);
         await new Promise(r => setTimeout(r, 10000));
       } else {
         console.error(`[Moderation] API Error: ${error.message}`);
@@ -164,6 +203,8 @@ async function processModQueue() {
 
 async function handleChatResponse(sender, message) {
   try {
+    await enforceRateLimit(chatTimestamps);
+
     const response = await chatGroq.chat.completions.create({
       messages: [
         { role: 'system', content: CHAT_SYSTEM_PROMPT },
@@ -337,7 +378,6 @@ function createBot() {
     }
 
     if (!sender || !message || sender === CONFIG.server.username || sender === 'detected') return;
-    if (message.length < 2 || message.match(/^\d+\s+seconds$/i)) return;
 
     console.log(`[Chat] ${sender}: ${message}`);
 
