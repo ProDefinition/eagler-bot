@@ -21,14 +21,13 @@ const CONFIG = {
     max_length: 250,  
   },
   groq: {
-    // Put your 3 Moderation API keys here
     modApiKeys: [
       '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',
       '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',
       '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'
     ],
     chatApiKey: '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',
-    model: 'openai/gpt-oss-20b',      
+    model: 'llama-3.3-70b-versatile',      
     chatModel: 'llama-3.1-8b-instant',
     maxQueueSize: 100                 
   }
@@ -47,11 +46,9 @@ const modCache = new Map();
 const chatTimestamps = [];
 const MAX_RPM = 28; 
 
-// Initialize an array of Groq clients for moderation
 const modClients = CONFIG.groq.modApiKeys.map(key => new Groq({ apiKey: key }));
 let currentModClientIndex = 0;
 
-// Track timestamps for each moderation key separately
 const modTimestamps = Array(CONFIG.groq.modApiKeys.length).fill().map(() => []);
 
 const chatGroq = new Groq({ apiKey: CONFIG.groq.chatApiKey });
@@ -161,7 +158,6 @@ async function processModQueue() {
       continue;
     }
 
-    // Grab the current client and rotate the index for the next loop
     const keyIndex = currentModClientIndex;
     const currentGroq = modClients[keyIndex];
     currentModClientIndex = (currentModClientIndex + 1) % modClients.length;
@@ -170,6 +166,8 @@ async function processModQueue() {
 
     const contextStr = chatHistory.map(msg => `[${msg.time}] ${msg.sender}: ${msg.message}`).join('\n');
     
+    console.log(`[Mod Debug] Sending to AI -> Sender: ${item.sender} | Msg: "${item.message}"`);
+
     try {
       const response = await currentGroq.chat.completions.create({
         messages: [
@@ -182,6 +180,7 @@ async function processModQueue() {
       });
 
       let reply = response.choices[0]?.message?.content?.trim() || '{}';
+      console.log(`[Mod Debug] AI RAW Reply:`, reply.replace(/[\n\r]/g, ' '));
       
       const startIdx = reply.indexOf('{');
       const endIdx = reply.lastIndexOf('}');
@@ -201,7 +200,7 @@ async function processModQueue() {
       }
 
       modQueue.shift(); 
-      consecutive429s = 0; // Reset failsafe on success
+      consecutive429s = 0; 
 
     } catch (error) {
       if (error.status === 429) {
@@ -213,8 +212,6 @@ async function processModQueue() {
           await new Promise(r => setTimeout(r, 10000));
           consecutive429s = 0;
         }
-        
-        // We do NOT shift the queue here, allowing the exact same message to retry on the next key loop
       } else {
         console.error(`[Moderation] API Error: ${error.message}`);
         modQueue.shift(); 
@@ -384,12 +381,19 @@ function createBot() {
     let sender = null;
     let message = null;
 
-    const cleanText = text.replace(/^(?:\[[^\]]+\]\s*)*(?:MOD|HELPER|SRHELPER|OWNER|ADMIN|COOWNER|BUILDER|VIP|MVP|YOUTUBE)\s+/i, '');
-    const match1 = cleanText.match(/^([a-zA-Z0-9_]{3,16})\s*[:»\-]\s*(.+)/);
+    const cleanText = text.replace(/^(?:\[[^\]]+\]\s*)*(?:MOD|HELPER|SRHELPER|OWNER|ADMIN|COOWNER|BUILDER|VIP|MVP|YOUTUBE|DEFAULT)\s+/i, '').trim();
     
-    if (match1) {
-      sender = match1[1];
-      message = match1[2];
+    // Check for <Player> message
+    const matchVanilla = cleanText.match(/^<~?([a-zA-Z0-9_]{3,16})>\s*(.+)/);
+    // Check for Player: message or Player » message
+    const matchPrefix = cleanText.match(/^~?([a-zA-Z0-9_]{3,16})\s*[:»\->]\s*(.+)/);
+    
+    if (matchVanilla) {
+      sender = matchVanilla[1];
+      message = matchVanilla[2];
+    } else if (matchPrefix) {
+      sender = matchPrefix[1];
+      message = matchPrefix[2];
     } else if (text.includes(':')) {
       const parts = text.split(':');
       const beforeColon = parts[0].replace(/^\[.*?\]\s*/, '').trim();
