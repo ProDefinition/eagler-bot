@@ -2,13 +2,10 @@ const mineflayer = require('mineflayer');
 const readline = require('readline');
 const { Groq } = require('groq-sdk');
 
-// Catch log, warn, and error to ensure chunk spam is completely muted
 ['log', 'warn', 'error'].forEach((method) => {
     const original = console[method];
     console[method] = function(...args) {
-        if (args.length && typeof args[0] === 'string' && args[0].includes('Ignoring block entities as chunk failed to load')) {
-            return;
-        }
+        if (args.length && typeof args[0] === 'string' && args[0].includes('Ignoring block entities as chunk failed to load')) return;
         original.apply(console, args);
     };
 });
@@ -25,38 +22,28 @@ const CONFIG = {
   },
   groq: {
     apiKey: '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', 
-    chatApiKey: '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', // <-- Updated Chat API Key
+    chatApiKey: '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',
     model: 'openai/gpt-oss-20b',      
     chatModel: 'llama-3.1-8b-instant',
     maxQueueSize: 100                 
   }
 };
 
-// ========================
-// STATE & MEMORY
-// ========================
 let bot = null;
 let isInGame = false;
 let isLoggedIn = false;
 let isReady = false; 
 
-// Agent's memory
 const chatHistory = [];
 const MAX_HISTORY = 15; 
 const warnedPlayers = new Set(); 
 
-// ========================
-// GROQ CLIENTS & QUEUES
-// ========================
-const groq = new Groq({ apiKey: CONFIG.groq.apiKey }); // Moderation AI
-const chatGroq = new Groq({ apiKey: CONFIG.groq.chatApiKey }); // Conversational AI
+const groq = new Groq({ apiKey: CONFIG.groq.apiKey });
+const chatGroq = new Groq({ apiKey: CONFIG.groq.chatApiKey });
 
 const modQueue = [];
 let isProcessingQueue = false;
 
-// ========================
-// AI PROMPTS
-// ========================
 const SYSTEM_PROMPT = `
 You are a ZERO-TOLERANCE, strict AI moderator for a Minecraft server.
 You will evaluate the provided chat message.
@@ -71,11 +58,11 @@ Choose the appropriate action:
 - MUTE: Severe slurs, bypass attempts, or heavy harassment.
 - KICK: Extreme violations (e.g., threats, extreme hate speech).
 
-You MUST respond strictly in valid JSON format. Do not include markdown formatting or extra text.
+You MUST respond strictly in valid JSON format.
 {
   "action": "NONE" | "WARN" | "MUTE" | "KICK",
   "target": "username of offender",
-  "duration": "10m" (only required if action is MUTE),
+  "duration": "10m",
   "reason": "Brief, professional reason for the punishment"
 }
 `;
@@ -97,9 +84,6 @@ RULES:
 - Address players by name.
 `;
 
-// ========================
-// CHAT & MODERATION LOGIC
-// ========================
 async function processModQueue() {
   if (isProcessingQueue || modQueue.length === 0) return;
   isProcessingQueue = true;
@@ -120,7 +104,13 @@ async function processModQueue() {
       });
 
       let reply = response.choices[0]?.message?.content?.trim() || '{}';
-      reply = reply.replace(/^```json/i, '').replace(/```$/, '').trim();
+      
+      // Forces extraction of purely the JSON object, ignoring any markdown or conversational filler
+      const startIdx = reply.indexOf('{');
+      const endIdx = reply.lastIndexOf('}');
+      if (startIdx !== -1 && endIdx !== -1) {
+        reply = reply.substring(startIdx, endIdx + 1);
+      }
 
       try {
         const decision = JSON.parse(reply);
@@ -180,19 +170,17 @@ async function handleChatResponse(sender, message) {
         { role: 'user', content: `${sender}: ${message}` }
       ],
       model: CONFIG.groq.chatModel,
-      temperature: 0.9, // Higher temperature makes him more unpredictable/human-like
+      temperature: 0.9, 
       max_tokens: 60,
     });
 
     let reply = response.choices[0]?.message?.content?.trim();
 
-    // Logic to "Ignore" the player if the AI thinks the message is a waste of time
     if (!reply || reply.includes('[IGNORE]') || reply === '...') {
       console.log(`[AI Chat] Habibi decided to ignore ${sender}.`);
       return; 
     }
     
-    // Occasionally strip formal punctuation to look more like a real player
     if (Math.random() > 0.5) {
       reply = reply.toLowerCase().replace(/[.!?]$/, "");
     }
@@ -204,9 +192,6 @@ async function handleChatResponse(sender, message) {
   }
 }
 
-// ========================
-// UTILITIES
-// ========================
 function say(text) {
   if (!bot || !text) return;
   text = text.replace(/[\n\r]/g, ' ').trim();
@@ -236,9 +221,6 @@ function say(text) {
   }, 250);
 }
 
-// ========================
-// BOT CREATION
-// ========================
 function createBot() {
   console.log('[Bot] Connecting to server...');
 
@@ -359,11 +341,9 @@ function createBot() {
 
     console.log(`[Chat] ${sender}: ${message}`);
 
-    // Update memory
     chatHistory.push({ time: new Date().toLocaleTimeString(), sender, message });
     if (chatHistory.length > MAX_HISTORY) chatHistory.shift();
 
-    // 1. Process Moderation
     if (modQueue.length < CONFIG.groq.maxQueueSize) {
       modQueue.push({ sender, message });
       processModQueue();
@@ -371,7 +351,6 @@ function createBot() {
       console.warn('[Moderation] Warning: Queue full. Skipping message.');
     }
 
-    // 2. Process Conversation (Triggered if bot is mentioned)
     if (message.toLowerCase().includes(CONFIG.server.username.toLowerCase())) {
         handleChatResponse(sender, message);
     }
@@ -397,9 +376,6 @@ function createBot() {
   });
 }
 
-// ========================
-// GRACEFUL SHUTDOWN
-// ========================
 function shutdown() {
   console.log('\n[System] Shutting down gracefully. Disconnecting bot...');
   if (bot) bot.quit(); 
@@ -409,9 +385,6 @@ function shutdown() {
 process.on('SIGINT', shutdown);  
 process.on('SIGTERM', shutdown); 
 
-// ========================
-// TERMINAL INPUT
-// ========================
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout,
@@ -433,7 +406,4 @@ rl.on('close', () => {
   shutdown();
 });
 
-// ========================
-// START
-// ========================
 createBot();
