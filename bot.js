@@ -21,8 +21,13 @@ const CONFIG = {
     max_length: 250,  
   },
   groq: {
-    apiKey: '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', 
-    chatApiKey: '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',
+    // Put your 3 Moderation API keys here
+    modApiKeys: [
+      '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',
+      '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',
+      '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'
+    ],
+    chatApiKey: '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',
     model: 'openai/gpt-oss-20b',      
     chatModel: 'llama-3.1-8b-instant',
     maxQueueSize: 100                 
@@ -38,17 +43,22 @@ const chatHistory = [];
 const MAX_HISTORY = 15; 
 const warnedPlayers = new Set(); 
 
-// Smart Caching & Rate Limiting State
 const modCache = new Map(); 
-const modTimestamps = [];
 const chatTimestamps = [];
-const MAX_RPM = 28; // Keeps you safely under the standard 30 RPM Groq limit
+const MAX_RPM = 28; 
 
-const groq = new Groq({ apiKey: CONFIG.groq.apiKey });
+// Initialize an array of Groq clients for moderation
+const modClients = CONFIG.groq.modApiKeys.map(key => new Groq({ apiKey: key }));
+let currentModClientIndex = 0;
+
+// Track timestamps for each moderation key separately
+const modTimestamps = Array(CONFIG.groq.modApiKeys.length).fill().map(() => []);
+
 const chatGroq = new Groq({ apiKey: CONFIG.groq.chatApiKey });
 
 const modQueue = [];
 let isProcessingQueue = false;
+let consecutive429s = 0;
 
 const SYSTEM_PROMPT = `
 You are a ZERO-TOLERANCE, strict AI moderator for a Minecraft server.
@@ -98,7 +108,7 @@ async function enforceRateLimit(timestampsArray) {
 
   if (timestampsArray.length >= MAX_RPM) {
     const waitTime = 60000 - (now - timestampsArray[0]) + 100;
-    console.log(`[Rate Limit] Approaching RPM limit. Dynamic throttle paused queue for ${waitTime}ms.`);
+    console.log(`[Rate Limit] Key approaching RPM limit. Pausing this specific key for ${waitTime}ms.`);
     await new Promise(r => setTimeout(r, waitTime));
     return enforceRateLimit(timestampsArray); 
   }
@@ -151,12 +161,17 @@ async function processModQueue() {
       continue;
     }
 
-    await enforceRateLimit(modTimestamps);
+    // Grab the current client and rotate the index for the next loop
+    const keyIndex = currentModClientIndex;
+    const currentGroq = modClients[keyIndex];
+    currentModClientIndex = (currentModClientIndex + 1) % modClients.length;
+
+    await enforceRateLimit(modTimestamps[keyIndex]);
 
     const contextStr = chatHistory.map(msg => `[${msg.time}] ${msg.sender}: ${msg.message}`).join('\n');
     
     try {
-      const response = await groq.chat.completions.create({
+      const response = await currentGroq.chat.completions.create({
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content: `CHAT HISTORY:\n${contextStr || 'No prior history.'}\n\nEVALUATE THIS MESSAGE:\nSender: ${item.sender}\nMessage: "${item.message}"` }
@@ -186,11 +201,20 @@ async function processModQueue() {
       }
 
       modQueue.shift(); 
+      consecutive429s = 0; // Reset failsafe on success
 
     } catch (error) {
       if (error.status === 429) {
-        console.warn(`[Moderation] Rate limit hit despite throttling! Hard pausing for 10s...`);
-        await new Promise(r => setTimeout(r, 10000));
+        consecutive429s++;
+        console.warn(`[Moderation] Rate limit hit on Key ${keyIndex + 1}! Switching to next key...`);
+        
+        if (consecutive429s >= modClients.length) {
+          console.warn(`[Moderation] ALL keys rate limited. Hard pausing for 10 seconds.`);
+          await new Promise(r => setTimeout(r, 10000));
+          consecutive429s = 0;
+        }
+        
+        // We do NOT shift the queue here, allowing the exact same message to retry on the next key loop
       } else {
         console.error(`[Moderation] API Error: ${error.message}`);
         modQueue.shift(); 
