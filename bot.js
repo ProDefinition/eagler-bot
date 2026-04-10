@@ -24,7 +24,7 @@ const CONFIG = {
     max_length: 250,  
   },
   groq: {
-    apiKey: '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', // <-- PASTE YOUR API KEY RIGHT HERE
+    apiKey: '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', // <-- API KEY
     model: 'openai/gpt-oss-20b',          // Fast, small model perfect for yes/no classification
     muteDuration: '10m',              // Default mute duration
     maxQueueSize: 100                 // Prevent memory leaks if API is down
@@ -129,34 +129,6 @@ function say(text) {
 }
 
 // ========================
-// COMMANDS
-// ========================
-function handleBangCommand(sender, msg) {
-  const args = msg.slice(1).split(/\s+/);
-  const cmd = args[0].toLowerCase();
-
-  switch (cmd) {
-    case 'inventory':
-      const items = bot.inventory.items().map(i => `${i.name}: ${i.count}`).join(', ');
-      say(`Inventory: ${items || 'empty'}`);
-      break;
-    case 'status':
-      say(`Health: ${Math.round(bot.health)}/${bot.maxHealth}, Food: ${bot.food}/20`);
-      break;
-    case 'help':
-      say('Commands: !inventory, !status, !roll');
-      break;
-    case 'roll':
-      const sides = parseInt(args[1]) || 6;
-      const roll = Math.floor(Math.random() * sides) + 1;
-      say(`🎲 Rolled: ${roll}/${sides}`);
-      break;
-    default:
-      say(`Unknown command: ${cmd}`);
-  }
-}
-
-// ========================
 // BOT CREATION
 // ========================
 function createBot() {
@@ -253,24 +225,18 @@ function createBot() {
       }
     }
 
+    // Ignore self and empty/system-like short messages
     if (!sender || !message || sender === CONFIG.server.username || sender === 'detected') return;
     if (message.length < 2 || message.match(/^\d+\s+seconds$/i)) return;
 
     console.log(`[Chat] ${sender}: ${message}`);
 
-    // Queue message for AI moderation (ignore commands to prevent loop checking)
-    if (!message.startsWith('!')) {
-      if (modQueue.length < CONFIG.groq.maxQueueSize) {
-        modQueue.push({ sender, message });
-        processModQueue();
-      } else {
-        console.warn('[Moderation] Warning: Queue is full. Dropping incoming message.');
-      }
-    }
-
-    // Handle standard commands
-    if (message.startsWith('!')) {
-      handleBangCommand(sender, message);
+    // Queue message for AI moderation (Everything parsed is checked)
+    if (modQueue.length < CONFIG.groq.maxQueueSize) {
+      modQueue.push({ sender, message });
+      processModQueue();
+    } else {
+      console.warn('[Moderation] Warning: Queue is full. Dropping incoming message.');
     }
   });
 
@@ -305,9 +271,7 @@ const rl = readline.createInterface({
 rl.prompt();
 rl.on('line', (line) => {
   const msg = line.trim();
-  if (msg.startsWith('!')) {
-    handleBangCommand('Terminal', msg);
-  } else if (msg.startsWith('/')) {
+  if (msg.startsWith('/')) {
     if (bot) bot.chat(msg);
   } else if (msg) {
     say(msg);
