@@ -4,9 +4,6 @@ const { pathfinder, Movements } = require('mineflayer-pathfinder');
 const { plugin: collectBlock } = require('mineflayer-collectblock');
 const readline = require('readline');
 
-// ========================
-// SUPPRESS CHUNK WARNINGS
-// ========================
 // Catch log, warn, and error to ensure the chunk spam is completely muted.
 ['log', 'warn', 'error'].forEach((method) => {
     const original = console[method];
@@ -18,9 +15,6 @@ const readline = require('readline');
     };
 });
 
-// ========================
-// CONFIGURATION
-// ========================
 const CONFIG = {
   apiKeys: [
     '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', 
@@ -30,8 +24,8 @@ const CONFIG = {
 
   models: {
     // Note: Removed the invalid "openai/gpt-oss" models as Groq will reject them and trigger errors.
-    chat: ['llama-3.3-70b-versatile', 'mixtral-8x7b-32768'],
-    moderation: ['llama-3.1-8b-instant', 'gemma2-9b-it']
+    chat: ['llama-3.1-8b-instant', 'openai/gpt-oss-20b'], //Yes, These models do exist.
+    moderation: ['openai/gpt-oss-120b', 'qwen/qwen3-32b'] //I am unsure whether qwen is confirmed, but, it is in the groq doc. Also, Openai GPT OSS models are valid, they are in the supported models doc.
   },
 
   server: {
@@ -263,11 +257,21 @@ async function getAIResponse(message, sender) {
   const memory = getMemory(sender);
   const onlinePlayers = getOnlineUsernames();
   
-  const system = `You are Habibi, a friendly Minecraft server helper. 
-Be concise (under 250 chars). Answer questions helpfully.
-Never output commands or admit you're a bot.
-IMPORTANT: The following are legitimate player usernames, do NOT flag them as profanity bypasses: ${onlinePlayers}.
-If you notice the user's message contains severe profanity that might have been missed, start your response with "[ALERT]".`;
+  const system = `You are Habibi, a casual player on this Minecraft SMP. You are absolutely NOT a server helper, an AI, or a bot.
+
+ACT EXACTLY LIKE A REAL HUMAN GAMER:
+- Type entirely or mostly in lowercase. Real players don't use proper capitalization.
+- Use lazy punctuation (skip apostrophes and periods at the end of sentences).
+- Use natural gaming slang (lol, lmao, fr, bro, ngl, nah, wdym, bruh, wtf).
+- Be incredibly brief. 1-2 short sentences maximum. Real players type fast.
+- Never act like a customer service agent. Don't offer unsolicited help, just vibe and chat normally.
+- If someone asks if you are a bot, laugh it off, be sarcastic, or act mildly annoyed (e.g., "bruh im literally a person", "beep boop jk im real").
+
+STRICT RULES:
+- Never output Minecraft commands (like /spawn).
+- Never admit you are an AI or language model. 
+- The following are legitimate player usernames, do NOT flag them as profanity bypasses: ${onlinePlayers}.
+- If you notice the user's message contains severe profanity or slurs that might have been missed by the filter, start your response EXACTLY with "[ALERT]". Otherwise, reply normally.`;
 
   const response = await callGroq(
     [
