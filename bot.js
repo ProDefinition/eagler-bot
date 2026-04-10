@@ -129,7 +129,9 @@ function getOnlineUsernames() {
   return Object.keys(bot.players).join(', ');
 }
 
-// 🛑 Updated callGroq: Supports separate clients based on the 'type' parameter
+// ========================
+// GROQ API CALLER
+// ========================
 async function callGroq(messages, maxTokens = 100, temperature = 0.7, modelList = CONFIG.models.chat, type = 'chat') {
   const apiKeys = type === 'mod' ? CONFIG.apiKeysMod : CONFIG.apiKeysChat;
   let keysTried = 0;
@@ -205,10 +207,10 @@ Message: "${message}"`;
 
   const result = await callGroq(
     [{ role: 'user', content: prompt }],
-    5, // Very low tokens needed for a Yes/No response
+    5, 
     0.0,
     CONFIG.models.moderation,
-    'mod' // Tells callGroq to use the moderation API keys
+    'mod' 
   );
 
   if (!result) return { isProfane: false };
@@ -223,8 +225,8 @@ Message: "${message}"`;
 function mute(player, reason = 'Rule violation') {
   const duration = CONFIG.moderation.mute_duration;
   
-  // Safely format the reason to prevent command breaking
-  let safeReason = reason.replace(/[\n\r]/g, ' ').substring(0, 100);
+  // CRITICAL FIX: Strip colons so the bot doesn't parse its own reason as a chat message
+  let safeReason = reason.replace(/[:\n\r]/g, ' ').substring(0, 100);
   
   bot.chat(`/tempmute ${player} ${duration}m ${safeReason}`);
   
@@ -242,7 +244,7 @@ function mute(player, reason = 'Rule violation') {
 }
 
 async function checkViolation(sender, message) {
-  // Hardcoded regex block: Catches severe slurs AND obvious swear words instantly without asking the AI.
+  // Hardcoded regex block
   const SEVERE_SLURS = [
     /\bn[i1@]+gg[ae3@]+r\b/i,
     /\bf[a@4]+gg[o0@]+t\b/i,
@@ -257,16 +259,16 @@ async function checkViolation(sender, message) {
   for (const pattern of SEVERE_SLURS) {
     if (pattern.test(message)) {
       console.log(`[MOD] Severe Hardcoded Violation: ${sender}`);
-      mute(sender, `Profanity detected: "${message}"`);
+      mute(sender, `Profanity detected - "${message}"`);
       return true;
     }
   }
 
-  // If it passes hardcoded checks, let AI analyze
+  // AI check
   const aiCheck = await checkProfanity(message);
   if (aiCheck.isProfane) {
     console.log(`[MOD] AI flagged profanity: ${sender}`);
-    mute(sender, `Profanity detected: "${message}"`);
+    mute(sender, `Profanity detected - "${message}"`);
     return true;
   }
 
@@ -305,7 +307,7 @@ STRICT RULES:
     40, 
     0.7,
     CONFIG.models.chat,
-    'chat' // Use chat API keys
+    'chat' 
   );
 
   if (!response) return null; 
@@ -314,9 +316,9 @@ STRICT RULES:
     console.log(`[Alert] Conversational model flagged missed profanity from ${sender}`);
     const secondCheck = await checkProfanity(message);
     if (secondCheck.isProfane) {
-      mute(sender, `Profanity detected: "${message}"`);
+      mute(sender, `Profanity detected - "${message}"`);
     } else {
-      mute(sender, `Missed profanity (Conversational Alert): "${message}"`);
+      mute(sender, `Missed profanity Alert - "${message}"`);
     }
     return response.replace('[ALERT]', '').trim();
   }
@@ -425,7 +427,6 @@ function createBot() {
 
     const lower = text.toLowerCase();
     
-    // Check if it's our previously ignored block entity spam just in case 
     if (lower.includes('ignoring block entities')) return;
 
     console.log(`[Server] ${text}`);
@@ -448,16 +449,16 @@ function createBot() {
       return;
     }
 
-    // Enhanced server message filtering
-    // Enhanced server message filtering
-    const isServerMessage = /^\[(Server|INFO|WARN|ERROR|System)\]/.test(text) ||
+    // CRITICAL FIX: Aggressive server message filtering to completely ignore moderation logs
+    const isServerMessage = /^\[(Server|INFO|WARN|ERROR|System)\]/i.test(text) ||
                             /^\*{3}/.test(text) ||
                             /^\[[+\-]\]/.test(text) ||
-                            /(joined|left) the game/.test(text) ||
+                            /(joined|left) the game/i.test(text) ||
                             /(time|seconds|queue|position|limbo|lifesteal|full|estimated)/i.test(text) ||
-                            /Habibi (tempmuted|unmuted|muted)/i.test(text) || // 🛑 ADD THIS LINE TO FIX THE LOOP
-                            /\[Spartan Notification\]/.test(text) ||
-                            /Welcome back!/.test(text);
+                            /(tempmuted|unmuted|muted|banned|kicked)/i.test(text) ||
+                            /^Habibi/i.test(text) ||
+                            /\[Spartan Notification\]/i.test(text) ||
+                            /Welcome back!/i.test(text);
     if (isServerMessage) return;
 
     let sender = null;
@@ -482,7 +483,8 @@ function createBot() {
       }
     }
 
-    if (!sender || !message || sender === 'Habibi') return;
+    // CRITICAL FIX: Hardcode 'detected' into the ignore list
+    if (!sender || !message || sender === 'Habibi' || sender === 'detected') return;
     
     if (message.length < 2 || message.match(/^\d+\s+seconds$/i)) return;
 
