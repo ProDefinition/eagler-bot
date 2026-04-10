@@ -25,7 +25,7 @@ const CONFIG = {
   },
   groq: {
     apiKey: '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', // <-- PASTE YOUR API KEY RIGHT HERE
-    model: 'llama3-8b-8192',          // Fast, small model perfect for yes/no classification
+    model: 'openai/gpt-oss-20b',          // Fast, small model perfect for yes/no classification
     muteDuration: '10m',              // Default mute duration
     maxQueueSize: 100                 // Prevent memory leaks if API is down
   }
