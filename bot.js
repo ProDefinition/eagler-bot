@@ -115,7 +115,7 @@ function getOnlineUsernames() {
   return Object.keys(bot.players).join(', ');
 }
 
-// 🛑 Updated callGroq: Safety limit prevents infinite freezing
+// 🛑 Updated callGroq: Safety limit prevents infinite freezing + Broadcasts Errors to MC Chat
 async function callGroq(messages, maxTokens = 100, temperature = 0.7, modelList = CONFIG.models.chat) {
   let keysTried = 0;
 
@@ -134,18 +134,25 @@ async function callGroq(messages, maxTokens = 100, temperature = 0.7, modelList 
         
       } catch (err) {
         console.error(`[API] Error (${model}): ${err.message}`);
+        
+        // Broadcast the error to the Minecraft Chat
+        let cleanErr = err.message.replace(/[\n\r]/g, ' ').substring(0, 60);
+        say(`[API Error] Model ${model} failed: ${cleanErr}...`);
+        
         continue; 
       }
     }
 
     console.log(`[API] ⚠️ All models failed on Key #${currentKeyIndex + 1}. Rotating to next key...`);
+    say(`[API Warning] Rotating to next API key...`);
     switchApiKey();
     keysTried++;
     await new Promise(resolve => setTimeout(resolve, 1000));
   }
   
   console.error('[API] ❌ All API keys failed or exhausted for this request.');
-  return null; // Return null instead of hanging infinitely
+  say('[API Fatal] All keys exhausted or rate-limited.');
+  return null; 
 }
 
 function addMemory(player, message) {
@@ -205,7 +212,7 @@ Normalized: "${normalized}"`;
     CONFIG.models.moderation
   );
 
-  if (!result) return { isProfane: false, reason: 'Error checking API' };
+  if (!result) return { isProfane: false, reason: 'API unreachable' };
 
   console.log(`[Profanity] Raw response: "${result}"`);
 
@@ -240,21 +247,27 @@ function mute(player, reason = 'Rule violation') {
 }
 
 async function checkViolation(sender, message) {
+  // Hardcoded regex block: Catches severe slurs AND obvious swear words instantly without asking the AI.
   const SEVERE_SLURS = [
     /\bn[i1@]+gg[ae3@]+r\b/i,
     /\bf[a@4]+gg[o0@]+t\b/i,
     /\bc[u\*@]+nt\b/i,
     /\b(kys|kill.{0,2}yourself)\b/i,
+    /\bf[u\*@]+c[k\*@]+/i,          // Catches fuck, fucking, etc.
+    /\bb[i1\*@]+t[c\*@]+h/i,        // Catches bitch, bitches
+    /\bwh[o0\*@]+r[e3\*@]+/i,       // Catches whore
+    /\bsh[i1\*@]+t\b/i              // Catches shit
   ];
 
   for (const pattern of SEVERE_SLURS) {
     if (pattern.test(message)) {
-      console.log(`[MOD] Severe violation: ${sender}`);
-      mute(sender, 'Hate speech (severe)');
+      console.log(`[MOD] Severe Hardcoded Violation: ${sender}`);
+      mute(sender, 'Severe Chat Violation');
       return true;
     }
   }
 
+  // If it passes hardcoded checks, let AI analyze for context or bypassed words
   const aiCheck = await checkProfanity(message);
   if (aiCheck.isProfane) {
     console.log(`[MOD] AI flagged profanity: ${sender} for ${aiCheck.reason}`);
@@ -294,12 +307,12 @@ STRICT RULES:
       { role: 'system', content: system },
       { role: 'user', content: `${sender}: ${message}\n${memory}` }
     ],
-    40, // Strictly limiting Max Tokens to prevent paragraphs
+    40, 
     0.7,
     CONFIG.models.chat
   );
 
-  if (!response) return "I'm currently having a brain freeze, try again in a second!";
+  if (!response) return null; // Keeps silent instead of broadcasting "brain freeze" if everything dies
 
   if (response.startsWith('[ALERT]')) {
     console.log(`[Alert] Conversational model flagged missed profanity from ${sender}`);
