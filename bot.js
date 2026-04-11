@@ -5,12 +5,13 @@ const { Groq } = require('groq-sdk');
 ['log', 'warn', 'error'].forEach((method) => {
     const original = console[method];
     console[method] = function(...args) {
-        if (args.length && typeof args[0] === 'string' && args[0].includes('Ignoring block entities as chunk failed to load')) return;
+        if (args.length && typeof args[0] === 'string' && args[0].includes('Ignoring block entities')) return;
         original.apply(console, args);
     };
 });
 
 const CONFIG = {
+  engine: 'Solaris v1.1',
   server: {
     host: 'play.pcsmp.net',
     port: 25565,
@@ -29,7 +30,7 @@ const CONFIG = {
     chatApiKey: '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',
     model: 'qwen/qwen3-32b',      
     chatModel: 'llama-3.1-8b-instant',
-    chunkIntervalMs: 4000 // How often to process a chunk of messages (4 seconds)
+    chunkIntervalMs: 4000 
   }
 };
 
@@ -41,7 +42,6 @@ let isReady = false;
 const chatHistory = [];
 const MAX_HISTORY = 15; 
 const warnedPlayers = new Set(); 
-const modCache = new Map(); 
 
 const chatTimestamps = [];
 const MAX_RPM = 28; 
@@ -52,48 +52,39 @@ const modTimestamps = Array(CONFIG.groq.modApiKeys.length).fill().map(() => []);
 
 const chatGroq = new Groq({ apiKey: CONFIG.groq.chatApiKey });
 
-// We changed this from a single queue to a chunk buffer
 let chunkBuffer = [];
 let isProcessingChunk = false;
 
-// NEW PROMPT: Tells the AI to process a chunk and return an Array.
 const SYSTEM_PROMPT = `
-You are an AI moderator for a Minecraft server.
-You will evaluate a CHUNK of recent chat messages.
+You are a moderation engine for a Minecraft server. Evaluate a CHUNK of recent chat messages.
 
-CRITICAL RULES - READ CAREFULLY:
-1. IGNORE RUDENESS & CAPS: You MUST NOT punish players for shouting (ALL CAPS), whining, demanding things, or mild spam.
-2. PROFANITY = MUTE: ANY profanity (e.g., "fuck", "shit", "bitch"), slurs, or swearing MUST result in a MUTE. Do not issue warnings for swearing.
+RULES:
+1. IGNORE MINOR OFFENSES: Do not punish shouting (caps), demanding behavior, or mild spam.
+2. PROFANITY = MUTE: Any swearing, offensive language, or slurs must result in a MUTE.
 
-Analyze the chunk of messages. Return a strictly formatted JSON ARRAY of punishments for anyone who broke the rules.
-If NO ONE broke any rules, you MUST return an empty array: []
+Analyze the chunk. Return a strictly formatted JSON ARRAY of punishments.
+If no rules were broken, return an empty array: []
 
 Format exactly like this:
 [
   {
     "action": "WARN" | "MUTE" | "KICK",
-    "target": "username of offender",
+    "target": "username",
     "duration": "10m",
-    "reason": "Brief reason"
+    "reason": "Brief reason",
+    "quote": "The exact chat message that broke the rule"
   }
 ]
 `;
 
 const CHAT_SYSTEM_PROMPT = `
-You are 'Habibi', a veteran Minecraft administrator. You've seen everything. You are highly realistic, grounded, and slightly cynical. 
+You are 'Habibi', a Minecraft server administrator. You are realistic and grounded.
 
-PERSONALITY & REALISM:
-- You are professional but speak like a real person. Use lowercase occasionally, use common internet shorthand (idk, mb, dw, lol) where it feels natural.
-- RELEVANCE: Only respond if the message is actually worth your time. 
-- IGNORING: If a player is being annoying, asking stupid questions, or saying something nonsensical, respond with the exact word "[IGNORE]".
-- DISMISSIVENESS: If you don't want to explain something, just say "idk" or "google it" or "not my problem."
-- THE RIZZ: On extremely rare occasions (1 in 50 chance), if a player is being genuinely cool or charming, you can drop a very subtle, smooth, or charismatic line. Do not be thirsty; be "cool."
-- You are an AI, but don't act like a corporate assistant. Act like a guy who gets paid to keep this server running.
-
-RULES:
-- Responses MUST be under 140 characters.
-- No emojis. No markdown.
-- Address players by name.
+PERSONALITY:
+- Speak casually, like a normal person. Use lowercase occasionally.
+- Keep responses concise. 
+- Ignore nonsensical or annoying messages by responding with exactly "[IGNORE]".
+- Responses must be under 140 characters. No emojis.
 `;
 
 async function enforceRateLimit(timestampsArray) {
@@ -114,42 +105,45 @@ async function enforceRateLimit(timestampsArray) {
 function handlePunishment(decision, target) {
   if (!decision || decision.action === 'NONE') return;
   
-  const reason = decision.reason ? `Automod: ${decision.reason}` : `Automod: Policy violation`;
+  let baseReason = decision.reason || 'Policy violation';
+  let quoteText = decision.quote ? ` - "${decision.quote}"` : '';
+  
+  if (quoteText.length > 60) {
+    quoteText = quoteText.substring(0, 57) + '..."';
+  }
+  
+  const fullReason = `Automod: ${baseReason}${quoteText}`;
   
   switch (decision.action.toUpperCase()) {
     case 'WARN':
       if (warnedPlayers.has(target)) {
-        say(`/tempmute ${target} 10m ${reason} (Ignored Warning)`);
-        console.log(`[System] Escalated ${target} to MUTE.`);
+        say(`/tempmute ${target} 10m ${fullReason} (Ignored Warning)`);
+        console.log(`[${CONFIG.engine}] Escalated ${target} to MUTE.`);
       } else {
         warnedPlayers.add(target);
-        say(`${target}, warning: ${reason}. next offense is a mute.`);
-        console.log(`[System] Issued first warning to ${target}.`);
+        say(`${target}, warning: ${baseReason}. next offense is a mute.`);
+        console.log(`[${CONFIG.engine}] Warned ${target}.`);
       }
       break;
     case 'MUTE':
       const duration = decision.duration || '10m';
-      say(`/tempmute ${target} ${duration} ${reason}`);
+      say(`/tempmute ${target} ${duration} ${fullReason}`);
+      console.log(`[${CONFIG.engine}] Muted ${target}.`);
       break;
     case 'KICK':
-      say(`/kick ${target} ${reason}`);
+      say(`/kick ${target} ${fullReason}`);
+      console.log(`[${CONFIG.engine}] Kicked ${target}.`);
       break;
   }
 }
 
-// THIS IS THE NEW CHUNK SCANNER
 async function processChunkScanner() {
   if (isProcessingChunk || chunkBuffer.length === 0) return;
   isProcessingChunk = true;
 
-  // Grab all messages currently in the buffer (up to 20 to prevent context overload)
   const chunkToProcess = chunkBuffer.splice(0, 20);
-  
-  // Format the chunk into a single readable string for the AI
   const formattedChunk = chunkToProcess.map(item => `Sender: ${item.sender} | Message: "${item.message}"`).join('\n');
   
-  console.log(`[Mod Debug] Scanning Chunk of ${chunkToProcess.length} messages...`);
-
   const keyIndex = currentModClientIndex;
   const currentGroq = modClients[keyIndex];
   currentModClientIndex = (currentModClientIndex + 1) % modClients.length;
@@ -160,7 +154,7 @@ async function processChunkScanner() {
     const response = await currentGroq.chat.completions.create({
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: `EVALUATE THIS CHUNK OF MESSAGES:\n\n${formattedChunk}` }
+        { role: 'user', content: `EVALUATE THIS CHUNK:\n\n${formattedChunk}` }
       ],
       model: CONFIG.groq.model,
       temperature: 0.0, 
@@ -168,9 +162,7 @@ async function processChunkScanner() {
     });
 
     let reply = response.choices[0]?.message?.content?.trim() || '[]';
-    console.log(`[Mod Debug] AI RAW Reply:`, reply.replace(/[\n\r]/g, ' '));
     
-    // Extract JSON Array
     const startIdx = reply.indexOf('[');
     const endIdx = reply.lastIndexOf(']');
     if (startIdx !== -1 && endIdx !== -1) {
@@ -179,29 +171,24 @@ async function processChunkScanner() {
 
     try {
       const decisions = JSON.parse(reply);
-      
       if (Array.isArray(decisions) && decisions.length > 0) {
-        decisions.forEach(decision => {
-           // Don't repunish if we've already cached this exact message context
-           handlePunishment(decision, decision.target);
-        });
+        decisions.forEach(decision => handlePunishment(decision, decision.target));
       }
     } catch (parseError) {
-      console.error(`[Moderation] Agent returned invalid JSON Array:`, reply);
+      console.error(`[${CONFIG.engine}] JSON parse failed.`);
     }
 
   } catch (error) {
-    console.error(`[Moderation] API Error during chunk scan: ${error.message}`);
-    // If it fails (like a 429), push the messages back to the front of the buffer to try again
     if (error.status === 429) {
        chunkBuffer = [...chunkToProcess, ...chunkBuffer];
+    } else {
+       console.error(`[${CONFIG.engine}] Moderation API Error: ${error.message}`);
     }
   }
 
   isProcessingChunk = false;
 }
 
-// Run the chunk scanner every 4 seconds
 setInterval(processChunkScanner, CONFIG.groq.chunkIntervalMs);
 
 async function handleChatResponse(sender, message) {
@@ -220,19 +207,16 @@ async function handleChatResponse(sender, message) {
 
     let reply = response.choices[0]?.message?.content?.trim();
 
-    if (!reply || reply.includes('[IGNORE]') || reply === '...') {
-      console.log(`[AI Chat] Habibi decided to ignore ${sender}.`);
-      return; 
-    }
+    if (!reply || reply.includes('[IGNORE]') || reply === '...') return;
     
     if (Math.random() > 0.5) {
       reply = reply.toLowerCase().replace(/[.!?]$/, "");
     }
 
     say(reply);
-    console.log(`[AI Chat] Responded to ${sender}: ${reply}`);
+    console.log(`[${CONFIG.engine} Chat] Responded to ${sender}: ${reply}`);
   } catch (error) {
-    console.error(`[AI Chat] API Error: ${error.message}`);
+    console.error(`[${CONFIG.engine} Chat] API Error: ${error.message}`);
   }
 }
 
@@ -242,7 +226,6 @@ function say(text) {
   
   setTimeout(() => {
     if (text.length <= CONFIG.chat.max_length) {
-      console.log(`[Say] ${text}`);
       bot.chat(text);
       return;
     }
@@ -254,10 +237,7 @@ function say(text) {
       const lastSpace = chunk.lastIndexOf(' ');
       if (lastSpace > CONFIG.chat.max_length / 2) chunk = chunk.slice(0, lastSpace);
       
-      setTimeout(() => {
-        console.log(`[Say] ${chunk}`);
-        bot.chat(chunk);
-      }, delay);
+      setTimeout(() => bot.chat(chunk), delay);
       
       delay += 500; 
       remaining = remaining.slice(chunk.length).trim();
@@ -266,7 +246,7 @@ function say(text) {
 }
 
 function createBot() {
-  console.log('[Bot] Connecting to server...');
+  console.log(`[${CONFIG.engine}] Connecting...`);
 
   bot = mineflayer.createBot({
     host: CONFIG.server.host,
@@ -276,13 +256,12 @@ function createBot() {
   });
 
   bot.once('spawn', async () => {
-    console.log('[Bot] Entity spawned. Initiating pre-flight checks...');
+    console.log(`[${CONFIG.engine}] Spawned. Running checks.`);
     isInGame = true;
 
     await new Promise(r => setTimeout(r, 2000));
 
     if (!isLoggedIn) {
-      console.log('[System] Waiting for authentication...');
       let attempts = 0;
       while (!isLoggedIn && attempts < 15) {
           await new Promise(r => setTimeout(r, 1000));
@@ -290,16 +269,13 @@ function createBot() {
       }
     }
 
-    console.log('[System] Testing server sync (Movement)...');
     bot.setControlState('jump', true);
     await new Promise(r => setTimeout(r, 300));
     bot.setControlState('jump', false);
 
-    console.log(`[System] Testing server sync (Data)... Health: ${bot.health}, Food: ${bot.food}`);
-    console.log('[System] Purging startup chat buffer (Waiting 3s)...');
     await new Promise(r => setTimeout(r, 3000));
 
-    console.log('[System] >>> ALL CHECKS PASSED. AGENT ARMED. <<<');
+    console.log(`[${CONFIG.engine}] Ready.`);
     isReady = true;
 
     setInterval(() => {
@@ -312,7 +288,7 @@ function createBot() {
   });
 
   bot.on('end', () => {
-    console.log('[Bot] Disconnected. Waiting 15s for server to clear ghost session...');
+    console.log(`[${CONFIG.engine}] Disconnected. Reconnecting in 15s...`);
     isInGame = false;
     isLoggedIn = false;
     isReady = false;
@@ -331,7 +307,6 @@ function createBot() {
     if (lower.includes('ignoring block entities')) return;
 
     if (!isLoggedIn && lower.includes('/login')) {
-      console.log('[Bot] Auto-logging in...');
       say('/login 551417114');
       return;
     }
@@ -387,11 +362,9 @@ function createBot() {
 
     if (!sender || !message || sender === CONFIG.server.username || sender === 'detected') return;
 
-    // Send chat to the chat history for context
     chatHistory.push({ time: new Date().toLocaleTimeString(), sender, message });
     if (chatHistory.length > MAX_HISTORY) chatHistory.shift();
 
-    // Push the message directly into the new Chunk Buffer
     if (message.length >= 3) {
       chunkBuffer.push({ sender, message });
     }
@@ -422,7 +395,7 @@ function createBot() {
 }
 
 function shutdown() {
-  console.log('\n[System] Shutting down gracefully. Disconnecting bot...');
+  console.log(`\n[${CONFIG.engine}] Shutting down...`);
   if (bot) bot.quit(); 
   setTimeout(() => process.exit(0), 500); 
 }
@@ -433,7 +406,7 @@ process.on('SIGTERM', shutdown);
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout,
-  prompt: 'Habibi> ',
+  prompt: 'Console> ',
 });
 
 rl.prompt();
