@@ -27,7 +27,7 @@ const CONFIG = {
       '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'
     ],
     chatApiKey: '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',
-    model: 'llama-3.3-70b-versatile',      
+    model: 'qwen/qwen3-32b',      
     chatModel: 'llama-3.1-8b-instant',
     chunkIntervalMs: 4000 // How often to process a chunk of messages (4 seconds)
   }
