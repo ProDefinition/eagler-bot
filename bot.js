@@ -11,7 +11,7 @@ const { Groq } = require('groq-sdk');
 });
 
 const CONFIG = {
-  engine: 'Solaris v1.2',
+  engine: 'Solaris v1.4',
   server: {
     host: 'play.pcsmp.net',
     port: 25565,
@@ -30,7 +30,10 @@ const CONFIG = {
     chatApiKey: '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',
     model: 'llama-3.3-70b-versatile',
     chatModel: 'llama-3.1-8b-instant',
-    chunkIntervalMs: 4500 // Scans exactly every 4.5 seconds
+    smartScan: {
+      maxBuffer: 15,    // Scan INSTANTLY if buffer hits this many messages
+      maxWaitMs: 7000   // Otherwise, wait this long for slow chat to bundle up
+    }
   }
 };
 
@@ -46,21 +49,22 @@ const warnedPlayers = new Set();
 const chatTimestamps = [];
 const MAX_RPM = 28; 
 
-const modClients = CONFIG.groq.modApiKeys.map(key => new Groq({ apiKey: key }));
+let modClients = CONFIG.groq.modApiKeys.map(key => new Groq({ apiKey: key }));
 let currentModClientIndex = 0;
-const modTimestamps = Array(CONFIG.groq.modApiKeys.length).fill().map(() => []);
+let modTimestamps = Array(CONFIG.groq.modApiKeys.length).fill().map(() => []);
 
 const chatGroq = new Groq({ apiKey: CONFIG.groq.chatApiKey });
 
 let chunkBuffer = [];
 let isProcessingChunk = false;
+let scanTimer = null; // Used for the new smart scanner
 
 const SYSTEM_PROMPT = `
 You are a moderation engine for a Minecraft server. Evaluate a CHUNK of recent chat messages.
 
 RULES:
 1. IGNORE MINOR OFFENSES: Do not punish shouting (caps), demanding behavior, or mild spam.
-2. PROFANITY = MUTE: Any swearing, offensive language, or slurs must result in a MUTE.
+2. ZERO TOLERANCE FOR PROFANITY: You MUST issue a "MUTE" for ANY cuss words, swearing, slurs, or highly offensive language. Do not let any cursing slide.
 
 Analyze the chunk. Return a strictly formatted JSON OBJECT containing a "punishments" array.
 If no rules were broken, return an empty array inside the object: {"punishments": []}
@@ -88,6 +92,42 @@ PERSONALITY:
 - Ignore nonsensical or annoying messages by responding with exactly "[IGNORE]".
 - Responses must be under 140 characters. No emojis.
 `;
+
+// --- API VERIFICATION ---
+async function verifyApiKeys() {
+  console.log(`\n[${CONFIG.engine}] 🔐 Verifying Groq API Keys...`);
+  
+  try {
+    await chatGroq.models.list();
+    console.log(`[${CONFIG.engine}] ✅ Chat API Key is functioning properly.`);
+  } catch (error) {
+    console.error(`[${CONFIG.engine}] ❌ Chat API Key FAILED: ${error.message}`);
+  }
+
+  const validModClients = [];
+  const validModTimestamps = [];
+
+  for (let i = 0; i < modClients.length; i++) {
+    try {
+      await modClients[i].models.list();
+      console.log(`[${CONFIG.engine}] ✅ Mod API Key ${i + 1} is functioning properly.`);
+      validModClients.push(modClients[i]);
+      validModTimestamps.push([]);
+    } catch (error) {
+      console.error(`[${CONFIG.engine}] ❌ Mod API Key ${i + 1} FAILED: ${error.message}. Removing from rotation.`);
+    }
+  }
+
+  modClients = validModClients;
+  modTimestamps = validModTimestamps;
+
+  if (modClients.length === 0) {
+    console.error(`\n[${CONFIG.engine}] 🚨 FATAL: All Moderation API keys failed. The bot cannot moderate. Shutting down...`);
+    process.exit(1);
+  }
+  
+  console.log(`[${CONFIG.engine}] 🟢 Key verification complete. Starting bot...\n`);
+}
 
 async function enforceRateLimit(timestampsArray) {
   const now = Date.now();
@@ -130,7 +170,7 @@ function handlePunishment(decision, target) {
     case 'MUTE':
       const duration = decision.duration || '10m';
       say(`/tempmute ${target} ${duration} ${fullReason}`);
-      console.log(`[${CONFIG.engine}] 🔇 Muted ${target}.`);
+      console.log(`[${CONFIG.engine}] 🔇 Muted ${target} for reason: ${fullReason}`);
       break;
     case 'KICK':
       say(`/kick ${target} ${fullReason}`);
@@ -139,14 +179,35 @@ function handlePunishment(decision, target) {
   }
 }
 
+// --- SMART DYNAMIC SCANNER ---
+function triggerSmartScan() {
+  if (isProcessingChunk) return;
+  
+  // If we hit the threshold, scan immediately
+  if (chunkBuffer.length >= CONFIG.groq.smartScan.maxBuffer) {
+    processChunkScanner();
+  } 
+  // Otherwise, start a wait timer for slow chat (if one isn't already running)
+  else if (!scanTimer && chunkBuffer.length > 0) {
+    scanTimer = setTimeout(() => {
+      processChunkScanner();
+    }, CONFIG.groq.smartScan.maxWaitMs);
+  }
+}
+
 async function processChunkScanner() {
+  // Clear any pending timers since we are scanning now
+  if (scanTimer) {
+    clearTimeout(scanTimer);
+    scanTimer = null;
+  }
+
   if (isProcessingChunk || chunkBuffer.length === 0) return;
   isProcessingChunk = true;
 
   const messagesToScan = chunkBuffer.length;
-  console.log(`[${CONFIG.engine}] 🔍 Bulk scanning ${messagesToScan} messages...`);
+  console.log(`[${CONFIG.engine}] 🔍 Smart scanning ${messagesToScan} messages...`);
 
-  // Splice up to 50 messages at once to keep the buffer from growing infinitely
   const chunkToProcess = chunkBuffer.splice(0, 50);
   const formattedChunk = chunkToProcess.map(item => `Sender: ${item.sender} | Message: "${item.message}"`).join('\n');
   
@@ -168,10 +229,11 @@ async function processChunkScanner() {
       max_tokens: 300,  
     });
 
-    const reply = response.choices[0]?.message?.content?.trim() || '{"punishments": []}';
-    
+    const reply = response.choices[0]?.message?.content || '{"punishments": []}';
+    const cleanReply = reply.replace(/```json/gi, '').replace(/```/g, '').trim();
+
     try {
-      const parsedData = JSON.parse(reply);
+      const parsedData = JSON.parse(cleanReply);
       const decisions = parsedData.punishments || [];
       
       if (Array.isArray(decisions) && decisions.length > 0) {
@@ -181,7 +243,7 @@ async function processChunkScanner() {
         console.log(`[${CONFIG.engine}] ✅ Scan complete. No violations found.`);
       }
     } catch (parseError) {
-      console.error(`[${CONFIG.engine}] JSON parse failed. Raw snippet: ${reply.substring(0, 50)}...`);
+      console.error(`[${CONFIG.engine}] JSON parse failed. Raw snippet: ${cleanReply.substring(0, 50)}...`);
     }
 
   } catch (error) {
@@ -193,9 +255,12 @@ async function processChunkScanner() {
   }
 
   isProcessingChunk = false;
+  
+  // If more messages piled up while the AI was thinking, trigger the next scan cycle
+  if (chunkBuffer.length > 0) {
+    triggerSmartScan();
+  }
 }
-
-setInterval(processChunkScanner, CONFIG.groq.chunkIntervalMs);
 
 async function handleChatResponse(sender, message) {
   try {
@@ -368,14 +433,14 @@ function createBot() {
 
     if (!sender || !message || sender === CONFIG.server.username || sender === 'detected') return;
 
-    // Log absolutely everything that comes through as a valid chat message
     console.log(`[LIVE CHAT] ${sender}: ${message}`);
 
     chatHistory.push({ time: new Date().toLocaleTimeString(), sender, message });
     if (chatHistory.length > MAX_HISTORY) chatHistory.shift();
 
-    // Push to buffer regardless of length to ensure no tiny bad words escape
+    // Push the message to the queue and instantly alert the smart scanner
     chunkBuffer.push({ sender, message });
+    triggerSmartScan();
 
     if (message.toLowerCase().includes(CONFIG.server.username.toLowerCase())) {
         handleChatResponse(sender, message);
@@ -432,4 +497,9 @@ rl.on('close', () => {
   shutdown();
 });
 
-createBot();
+async function boot() {
+  await verifyApiKeys();
+  createBot();
+}
+
+boot();
