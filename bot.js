@@ -29,7 +29,7 @@ const CONFIG = {
     chatApiKey: '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',
     model: 'llama-3.3-70b-versatile',      
     chatModel: 'llama-3.1-8b-instant',
-    maxQueueSize: 100                 
+    chunkIntervalMs: 4000 // How often to process a chunk of messages (4 seconds)
   }
 };
 
@@ -41,43 +41,42 @@ let isReady = false;
 const chatHistory = [];
 const MAX_HISTORY = 15; 
 const warnedPlayers = new Set(); 
-
 const modCache = new Map(); 
+
 const chatTimestamps = [];
 const MAX_RPM = 28; 
 
 const modClients = CONFIG.groq.modApiKeys.map(key => new Groq({ apiKey: key }));
 let currentModClientIndex = 0;
-
 const modTimestamps = Array(CONFIG.groq.modApiKeys.length).fill().map(() => []);
 
 const chatGroq = new Groq({ apiKey: CONFIG.groq.chatApiKey });
 
-const modQueue = [];
-let isProcessingQueue = false;
-let consecutive429s = 0;
+// We changed this from a single queue to a chunk buffer
+let chunkBuffer = [];
+let isProcessingChunk = false;
 
+// NEW PROMPT: Tells the AI to process a chunk and return an Array.
 const SYSTEM_PROMPT = `
 You are an AI moderator for a Minecraft server.
-You will evaluate the provided chat message strictly based on the rules below.
+You will evaluate a CHUNK of recent chat messages.
 
 CRITICAL RULES - READ CAREFULLY:
-1. IGNORE RUDENESS & CAPS: You MUST NOT punish players for shouting (ALL CAPS), being annoying, whining, being demanding, or minor spam. These are allowed.
-2. PROFANITY = MUTE: ANY profanity (e.g., "fuck", "shit", "bitch"), offensive language, or swearing MUST result in an immediate MUTE. Do not issue warnings for swearing.
+1. IGNORE RUDENESS & CAPS: You MUST NOT punish players for shouting (ALL CAPS), whining, demanding things, or mild spam.
+2. PROFANITY = MUTE: ANY profanity (e.g., "fuck", "shit", "bitch"), slurs, or swearing MUST result in a MUTE. Do not issue warnings for swearing.
 
-Choose the appropriate action:
-- NONE: The message contains no profanity. (You MUST choose NONE even if the player is being rude, using ALL CAPS, complaining, or demanding things).
-- WARN: Only use this for severe, actual chat-flooding spam. (DO NOT use for rudeness or swearing).
-- MUTE: ANY profanity, swearing, offensive language, toxicity, or slurs.
-- KICK: Extreme violations (e.g., IRL threats, extreme hate speech, doxxing).
+Analyze the chunk of messages. Return a strictly formatted JSON ARRAY of punishments for anyone who broke the rules.
+If NO ONE broke any rules, you MUST return an empty array: []
 
-You MUST respond strictly in valid JSON format.
-{
-  "action": "NONE" | "WARN" | "MUTE" | "KICK",
-  "target": "username of offender",
-  "duration": "10m",
-  "reason": "Brief, professional reason for the punishment"
-}
+Format exactly like this:
+[
+  {
+    "action": "WARN" | "MUTE" | "KICK",
+    "target": "username of offender",
+    "duration": "10m",
+    "reason": "Brief reason"
+  }
+]
 `;
 
 const CHAT_SYSTEM_PROMPT = `
@@ -105,7 +104,6 @@ async function enforceRateLimit(timestampsArray) {
 
   if (timestampsArray.length >= MAX_RPM) {
     const waitTime = 60000 - (now - timestampsArray[0]) + 100;
-    console.log(`[Rate Limit] Key approaching RPM limit. Pausing this specific key for ${waitTime}ms.`);
     await new Promise(r => setTimeout(r, waitTime));
     return enforceRateLimit(timestampsArray); 
   }
@@ -114,7 +112,7 @@ async function enforceRateLimit(timestampsArray) {
 }
 
 function handlePunishment(decision, target) {
-  if (decision.action === 'NONE') return;
+  if (!decision || decision.action === 'NONE') return;
   
   const reason = decision.reason ? `Automod: ${decision.reason}` : `Automod: Policy violation`;
   
@@ -139,88 +137,72 @@ function handlePunishment(decision, target) {
   }
 }
 
-async function processModQueue() {
-  if (isProcessingQueue || modQueue.length === 0) return;
-  isProcessingQueue = true;
+// THIS IS THE NEW CHUNK SCANNER
+async function processChunkScanner() {
+  if (isProcessingChunk || chunkBuffer.length === 0) return;
+  isProcessingChunk = true;
 
-  while (modQueue.length > 0) {
-    const item = modQueue[0];
-    const msgLower = item.message.toLowerCase();
+  // Grab all messages currently in the buffer (up to 20 to prevent context overload)
+  const chunkToProcess = chunkBuffer.splice(0, 20);
+  
+  // Format the chunk into a single readable string for the AI
+  const formattedChunk = chunkToProcess.map(item => `Sender: ${item.sender} | Message: "${item.message}"`).join('\n');
+  
+  console.log(`[Mod Debug] Scanning Chunk of ${chunkToProcess.length} messages...`);
 
-    if (msgLower.length < 3) {
-      modQueue.shift();
-      continue;
-    }
+  const keyIndex = currentModClientIndex;
+  const currentGroq = modClients[keyIndex];
+  currentModClientIndex = (currentModClientIndex + 1) % modClients.length;
 
-    if (modCache.has(msgLower)) {
-      handlePunishment(modCache.get(msgLower), item.sender);
-      modQueue.shift();
-      continue;
-    }
-
-    const keyIndex = currentModClientIndex;
-    const currentGroq = modClients[keyIndex];
-    currentModClientIndex = (currentModClientIndex + 1) % modClients.length;
-
+  try {
     await enforceRateLimit(modTimestamps[keyIndex]);
 
-    const contextStr = chatHistory.map(msg => `[${msg.time}] ${msg.sender}: ${msg.message}`).join('\n');
+    const response = await currentGroq.chat.completions.create({
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: `EVALUATE THIS CHUNK OF MESSAGES:\n\n${formattedChunk}` }
+      ],
+      model: CONFIG.groq.model,
+      temperature: 0.0, 
+      max_tokens: 300,  
+    });
+
+    let reply = response.choices[0]?.message?.content?.trim() || '[]';
+    console.log(`[Mod Debug] AI RAW Reply:`, reply.replace(/[\n\r]/g, ' '));
     
-    console.log(`[Mod Debug] Sending to AI -> Sender: ${item.sender} | Msg: "${item.message}"`);
+    // Extract JSON Array
+    const startIdx = reply.indexOf('[');
+    const endIdx = reply.lastIndexOf(']');
+    if (startIdx !== -1 && endIdx !== -1) {
+      reply = reply.substring(startIdx, endIdx + 1);
+    }
 
     try {
-      const response = await currentGroq.chat.completions.create({
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: `CHAT HISTORY:\n${contextStr || 'No prior history.'}\n\nEVALUATE THIS MESSAGE:\nSender: ${item.sender}\nMessage: "${item.message}"` }
-        ],
-        model: CONFIG.groq.model,
-        temperature: 0.0, 
-        max_tokens: 150,  
-      });
-
-      let reply = response.choices[0]?.message?.content?.trim() || '{}';
-      console.log(`[Mod Debug] AI RAW Reply:`, reply.replace(/[\n\r]/g, ' '));
+      const decisions = JSON.parse(reply);
       
-      const startIdx = reply.indexOf('{');
-      const endIdx = reply.lastIndexOf('}');
-      if (startIdx !== -1 && endIdx !== -1) {
-        reply = reply.substring(startIdx, endIdx + 1);
+      if (Array.isArray(decisions) && decisions.length > 0) {
+        decisions.forEach(decision => {
+           // Don't repunish if we've already cached this exact message context
+           handlePunishment(decision, decision.target);
+        });
       }
+    } catch (parseError) {
+      console.error(`[Moderation] Agent returned invalid JSON Array:`, reply);
+    }
 
-      try {
-        const decision = JSON.parse(reply);
-        
-        if (modCache.size > 1000) modCache.clear();
-        modCache.set(msgLower, decision);
-
-        handlePunishment(decision, decision.target || item.sender);
-      } catch (parseError) {
-        console.error(`[Moderation] Agent returned invalid JSON:`, reply);
-      }
-
-      modQueue.shift(); 
-      consecutive429s = 0; 
-
-    } catch (error) {
-      if (error.status === 429) {
-        consecutive429s++;
-        console.warn(`[Moderation] Rate limit hit on Key ${keyIndex + 1}! Switching to next key...`);
-        
-        if (consecutive429s >= modClients.length) {
-          console.warn(`[Moderation] ALL keys rate limited. Hard pausing for 10 seconds.`);
-          await new Promise(r => setTimeout(r, 10000));
-          consecutive429s = 0;
-        }
-      } else {
-        console.error(`[Moderation] API Error: ${error.message}`);
-        modQueue.shift(); 
-      }
+  } catch (error) {
+    console.error(`[Moderation] API Error during chunk scan: ${error.message}`);
+    // If it fails (like a 429), push the messages back to the front of the buffer to try again
+    if (error.status === 429) {
+       chunkBuffer = [...chunkToProcess, ...chunkBuffer];
     }
   }
 
-  isProcessingQueue = false;
+  isProcessingChunk = false;
 }
+
+// Run the chunk scanner every 4 seconds
+setInterval(processChunkScanner, CONFIG.groq.chunkIntervalMs);
 
 async function handleChatResponse(sender, message) {
   try {
@@ -383,9 +365,7 @@ function createBot() {
 
     const cleanText = text.replace(/^(?:\[[^\]]+\]\s*)*(?:MOD|HELPER|SRHELPER|OWNER|ADMIN|COOWNER|BUILDER|VIP|MVP|YOUTUBE|DEFAULT)\s+/i, '').trim();
     
-    // Check for <Player> message
     const matchVanilla = cleanText.match(/^<~?([a-zA-Z0-9_]{3,16})>\s*(.+)/);
-    // Check for Player: message or Player » message
     const matchPrefix = cleanText.match(/^~?([a-zA-Z0-9_]{3,16})\s*[:»\->]\s*(.+)/);
     
     if (matchVanilla) {
@@ -407,16 +387,13 @@ function createBot() {
 
     if (!sender || !message || sender === CONFIG.server.username || sender === 'detected') return;
 
-    console.log(`[Chat] ${sender}: ${message}`);
-
+    // Send chat to the chat history for context
     chatHistory.push({ time: new Date().toLocaleTimeString(), sender, message });
     if (chatHistory.length > MAX_HISTORY) chatHistory.shift();
 
-    if (modQueue.length < CONFIG.groq.maxQueueSize) {
-      modQueue.push({ sender, message });
-      processModQueue();
-    } else {
-      console.warn('[Moderation] Warning: Queue full. Skipping message.');
+    // Push the message directly into the new Chunk Buffer
+    if (message.length >= 3) {
+      chunkBuffer.push({ sender, message });
     }
 
     if (message.toLowerCase().includes(CONFIG.server.username.toLowerCase())) {
