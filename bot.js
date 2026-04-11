@@ -3,15 +3,15 @@ const readline = require('readline');
 const { Groq } = require('groq-sdk');
 
 ['log', 'warn', 'error'].forEach((method) => {
-    const original = console[method];
-    console[method] = function(...args) {
-        if (args.length && typeof args[0] === 'string' && args[0].includes('Ignoring block entities')) return;
-        original.apply(console, args);
-    };
+  const original = console[method];
+  console[method] = function(...args) {
+    if (args.length && typeof args[0] === 'string' && args[0].includes('Ignoring block entities')) return;
+    original.apply(console, args);
+  };
 });
 
 const CONFIG = {
-  engine: 'Solaris v1.1',
+  engine: 'Solaris v1.2',
   server: {
     host: 'play.pcsmp.net',
     port: 25565,
@@ -28,9 +28,9 @@ const CONFIG = {
       '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'
     ],
     chatApiKey: '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',
-    model: 'llama-3.3-70b-versatile',      
+    model: 'llama-3.3-70b-versatile',
     chatModel: 'llama-3.1-8b-instant',
-    chunkIntervalMs: 4000 
+    chunkIntervalMs: 4500 // Scans exactly every 4.5 seconds
   }
 };
 
@@ -120,21 +120,21 @@ function handlePunishment(decision, target) {
     case 'WARN':
       if (warnedPlayers.has(target)) {
         say(`/tempmute ${target} 10m ${fullReason} (Ignored Warning)`);
-        console.log(`[${CONFIG.engine}] Escalated ${target} to MUTE.`);
+        console.log(`[${CONFIG.engine}] 🔨 Escalated ${target} to MUTE.`);
       } else {
         warnedPlayers.add(target);
         say(`${target}, warning: ${baseReason}. next offense is a mute.`);
-        console.log(`[${CONFIG.engine}] Warned ${target}.`);
+        console.log(`[${CONFIG.engine}] ⚠️ Warned ${target}.`);
       }
       break;
     case 'MUTE':
       const duration = decision.duration || '10m';
       say(`/tempmute ${target} ${duration} ${fullReason}`);
-      console.log(`[${CONFIG.engine}] Muted ${target}.`);
+      console.log(`[${CONFIG.engine}] 🔇 Muted ${target}.`);
       break;
     case 'KICK':
       say(`/kick ${target} ${fullReason}`);
-      console.log(`[${CONFIG.engine}] Kicked ${target}.`);
+      console.log(`[${CONFIG.engine}] 🥾 Kicked ${target}.`);
       break;
   }
 }
@@ -143,7 +143,11 @@ async function processChunkScanner() {
   if (isProcessingChunk || chunkBuffer.length === 0) return;
   isProcessingChunk = true;
 
-  const chunkToProcess = chunkBuffer.splice(0, 20);
+  const messagesToScan = chunkBuffer.length;
+  console.log(`[${CONFIG.engine}] 🔍 Bulk scanning ${messagesToScan} messages...`);
+
+  // Splice up to 50 messages at once to keep the buffer from growing infinitely
+  const chunkToProcess = chunkBuffer.splice(0, 50);
   const formattedChunk = chunkToProcess.map(item => `Sender: ${item.sender} | Message: "${item.message}"`).join('\n');
   
   const keyIndex = currentModClientIndex;
@@ -171,7 +175,10 @@ async function processChunkScanner() {
       const decisions = parsedData.punishments || [];
       
       if (Array.isArray(decisions) && decisions.length > 0) {
+        console.log(`[${CONFIG.engine}] 🛑 Scan complete. Found ${decisions.length} violation(s).`);
         decisions.forEach(decision => handlePunishment(decision, decision.target));
+      } else {
+        console.log(`[${CONFIG.engine}] ✅ Scan complete. No violations found.`);
       }
     } catch (parseError) {
       console.error(`[${CONFIG.engine}] JSON parse failed. Raw snippet: ${reply.substring(0, 50)}...`);
@@ -361,12 +368,14 @@ function createBot() {
 
     if (!sender || !message || sender === CONFIG.server.username || sender === 'detected') return;
 
+    // Log absolutely everything that comes through as a valid chat message
+    console.log(`[LIVE CHAT] ${sender}: ${message}`);
+
     chatHistory.push({ time: new Date().toLocaleTimeString(), sender, message });
     if (chatHistory.length > MAX_HISTORY) chatHistory.shift();
 
-    if (message.length >= 3) {
-      chunkBuffer.push({ sender, message });
-    }
+    // Push to buffer regardless of length to ensure no tiny bad words escape
+    chunkBuffer.push({ sender, message });
 
     if (message.toLowerCase().includes(CONFIG.server.username.toLowerCase())) {
         handleChatResponse(sender, message);
