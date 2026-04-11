@@ -28,7 +28,7 @@ const CONFIG = {
       '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'
     ],
     chatApiKey: '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',
-    model: 'qwen/qwen3-32b',      
+    model: 'llama-3.3-70b-versatile',      
     chatModel: 'llama-3.1-8b-instant',
     chunkIntervalMs: 4000 
   }
@@ -62,19 +62,21 @@ RULES:
 1. IGNORE MINOR OFFENSES: Do not punish shouting (caps), demanding behavior, or mild spam.
 2. PROFANITY = MUTE: Any swearing, offensive language, or slurs must result in a MUTE.
 
-Analyze the chunk. Return a strictly formatted JSON ARRAY of punishments.
-If no rules were broken, return an empty array: []
+Analyze the chunk. Return a strictly formatted JSON OBJECT containing a "punishments" array.
+If no rules were broken, return an empty array inside the object: {"punishments": []}
 
 Format exactly like this:
-[
-  {
-    "action": "WARN" | "MUTE" | "KICK",
-    "target": "username",
-    "duration": "10m",
-    "reason": "Brief reason",
-    "quote": "The exact chat message that broke the rule"
-  }
-]
+{
+  "punishments": [
+    {
+      "action": "WARN",
+      "target": "username",
+      "duration": "10m",
+      "reason": "Brief reason",
+      "quote": "The exact chat message that broke the rule"
+    }
+  ]
+}
 `;
 
 const CHAT_SYSTEM_PROMPT = `
@@ -158,24 +160,21 @@ async function processChunkScanner() {
       ],
       model: CONFIG.groq.model,
       temperature: 0.0, 
+      response_format: { type: "json_object" }, 
       max_tokens: 300,  
     });
 
-    let reply = response.choices[0]?.message?.content?.trim() || '[]';
+    const reply = response.choices[0]?.message?.content?.trim() || '{"punishments": []}';
     
-    const startIdx = reply.indexOf('[');
-    const endIdx = reply.lastIndexOf(']');
-    if (startIdx !== -1 && endIdx !== -1) {
-      reply = reply.substring(startIdx, endIdx + 1);
-    }
-
     try {
-      const decisions = JSON.parse(reply);
+      const parsedData = JSON.parse(reply);
+      const decisions = parsedData.punishments || [];
+      
       if (Array.isArray(decisions) && decisions.length > 0) {
         decisions.forEach(decision => handlePunishment(decision, decision.target));
       }
     } catch (parseError) {
-      console.error(`[${CONFIG.engine}] JSON parse failed.`);
+      console.error(`[${CONFIG.engine}] JSON parse failed. Raw snippet: ${reply.substring(0, 50)}...`);
     }
 
   } catch (error) {
