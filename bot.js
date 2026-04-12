@@ -57,7 +57,7 @@ const chatGroq = new Groq({ apiKey: CONFIG.groq.chatApiKey });
 
 let chunkBuffer = [];
 let isProcessingChunk = false;
-let scanTimer = null; // Used for the new smart scanner
+let scanTimer = null; 
 
 const SYSTEM_PROMPT = `
 You are a moderation engine for a Minecraft server. Evaluate a CHUNK of recent chat messages.
@@ -183,11 +183,9 @@ function handlePunishment(decision, target) {
 function triggerSmartScan() {
   if (isProcessingChunk) return;
   
-  // If we hit the threshold, scan immediately
   if (chunkBuffer.length >= CONFIG.groq.smartScan.maxBuffer) {
     processChunkScanner();
   } 
-  // Otherwise, start a wait timer for slow chat (if one isn't already running)
   else if (!scanTimer && chunkBuffer.length > 0) {
     scanTimer = setTimeout(() => {
       processChunkScanner();
@@ -196,7 +194,6 @@ function triggerSmartScan() {
 }
 
 async function processChunkScanner() {
-  // Clear any pending timers since we are scanning now
   if (scanTimer) {
     clearTimeout(scanTimer);
     scanTimer = null;
@@ -205,7 +202,13 @@ async function processChunkScanner() {
   if (isProcessingChunk || chunkBuffer.length === 0) return;
   isProcessingChunk = true;
 
-  const messagesToScan = chunkBuffer.length;
+  // FIX: Drop extremely old messages so moderation stays real-time
+  if (chunkBuffer.length > 150) {
+    console.warn(`[${CONFIG.engine}] ⚠️ Buffer overloaded! Dropping ${chunkBuffer.length - 150} old messages to catch up.`);
+    chunkBuffer = chunkBuffer.slice(-150);
+  }
+
+  const messagesToScan = Math.min(chunkBuffer.length, 50);
   console.log(`[${CONFIG.engine}] 🔍 Smart scanning ${messagesToScan} messages...`);
 
   const chunkToProcess = chunkBuffer.splice(0, 50);
@@ -248,7 +251,11 @@ async function processChunkScanner() {
 
   } catch (error) {
     if (error.status === 429) {
+       console.warn(`[${CONFIG.engine}] ⚠️ API Rate Limit (429) hit. Backing off for 5 seconds...`);
+       // Put messages back at the front so they aren't lost
        chunkBuffer = [...chunkToProcess, ...chunkBuffer];
+       // FIX: Pause execution to prevent an infinite API spam loop
+       await new Promise(r => setTimeout(r, 5000));
     } else {
        console.error(`[${CONFIG.engine}] Moderation API Error: ${error.message}`);
     }
@@ -256,7 +263,6 @@ async function processChunkScanner() {
 
   isProcessingChunk = false;
   
-  // If more messages piled up while the AI was thinking, trigger the next scan cycle
   if (chunkBuffer.length > 0) {
     triggerSmartScan();
   }
@@ -438,7 +444,6 @@ function createBot() {
     chatHistory.push({ time: new Date().toLocaleTimeString(), sender, message });
     if (chatHistory.length > MAX_HISTORY) chatHistory.shift();
 
-    // Push the message to the queue and instantly alert the smart scanner
     chunkBuffer.push({ sender, message });
     triggerSmartScan();
 
