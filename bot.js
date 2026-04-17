@@ -26,7 +26,7 @@ const CONFIG = {
   chat: { max_length: 250 },
   groq: {
     chatApiKey: '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',
-    chatModel: 'llama-3.1-8b-instant',
+    chatModel: 'openai/gpt-oss-20b',
   },
   filter: { warnOnFirstOffense: true, muteDuration: '10m' },
 };
