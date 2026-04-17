@@ -12,7 +12,7 @@ const err = (...a) => console.log('[ERROR]', ...a);
 
 // ==================== CONFIG ====================
 const CONFIG = {
-  engine: 'Polaris v4.2',
+  engine: 'Polaris v4.3',
 
   server: {
     host: 'play.pcsmp.net',
@@ -20,7 +20,7 @@ const CONFIG = {
     username: 'Habibi',
     version: '1.12.2',
     password: '551417114',
-    targetServer: 'lifesteal'      // auto-join this server after login
+    targetServer: 'lifesteal'      // auto-join after login
   },
 
   chat: { max_length: 250 },
@@ -38,15 +38,6 @@ const CONFIG = {
   bannedWords: [
     'fuck','shit','cunt','nigger','faggot','asshole','bitch','dick','pussy',
     'whore','slut','bastard','retard','kys','kill yourself','nazi','hitler'
-  ],
-
-  // Words that will never be flagged as profanity (case-insensitive, normalized)
-  safeWords: [
-    'what', 'hi', 'hello', 'hey', 'program', 'debug', 'debugging',
-    'kill', 'die', 'dead', 'death', 'rn', 'right', 'now', 'nah',
-    'ok', 'okay', 'yes', 'no', 'maybe', 'dont', 'dont', 'cant',
-    'wont', 'im', 'youre', 'hes', 'shes', 'its', 'we', 'they',
-    'this', 'that', 'there', 'here', 'where', 'when', 'why', 'how'
   ]
 };
 
@@ -59,65 +50,150 @@ let autoSwitchDone = false;
 
 const chatGroq = new Groq({ apiKey: CONFIG.groq.chatApiKey });
 
-// Cooldown map to prevent repeated mutes within 30 seconds
+// Cooldown map to prevent repeated mutes (30 seconds)
 const muteCooldown = new Map();
 
-// ==================== UTIL: STRIP MINECRAFT COLOUR CODES ====================
+// ==================== UTIL: STRIP COLOUR CODES ====================
 function stripColorCodes(str) {
   return str.replace(/§[0-9a-fk-or]/g, '');
 }
 
-// ==================== ADVANCED FILTER (WITH SAFE WORD WHITELIST) ====================
-const charMap = new Map([
-  ["0","o"],["1","i"],["3","e"],["4","a"],["5","s"],["@","a"],["$","s"],["!","i"]
+// ==================== 7‑LAYER PROFANITY FILTER ====================
+// ------------------------------------------------------------------
+// 1. Unicode Scrub – NFKD + remove zero‑width spaces and diacritics
+function unicodeScrub(str) {
+  // Normalise to decomposed form, then remove combining diacritical marks
+  let normalized = str.normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
+  // Remove zero‑width spaces and other invisible characters
+  normalized = normalized.replace(/[\u200B-\u200D\uFEFF]/g, '');
+  return normalized;
+}
+
+// 2. Leet‑Swap – comprehensive symbol → letter map
+const leetMap = new Map([
+  ['0','o'], ['1','i'], ['2','z'], ['3','e'], ['4','a'], ['5','s'], ['6','g'],
+  ['7','t'], ['8','b'], ['9','g'], ['@','a'], ['$','s'], ['!','i'], ['+','t'],
+  ['#','h'], ['(','c'], ['µ','u'], ['ß','b'], ['€','e'], ['¥','y']
 ]);
 
-function normalize(str){
-  return str.toLowerCase().split('').map(c=>charMap.get(c)||c).join('').replace(/[^a-z0-9]/g,'');
+function leetSwap(str) {
+  return str.toLowerCase().split('').map(c => leetMap.get(c) || c).join('');
 }
 
-function squeeze(str){
-  return str.replace(/(.)\1+/g,'$1');
+// 3. De‑Spacing – remove all non‑alphabetic characters
+function despacing(str) {
+  return str.replace(/[^a-z]/g, '');
 }
 
-function levenshtein(a,b){
-  const m = [];
-  for(let i=0;i<=b.length;i++){ m[i]=[i]; }
-  for(let j=0;j<=a.length;j++){ m[0][j]=j; }
-  for(let i=1;i<=b.length;i++){
-    for(let j=1;j<=a.length;j++){
-      m[i][j] = b[i-1]==a[j-1] ? m[i-1][j-1] :
-        Math.min(m[i-1][j-1]+1, m[i][j-1]+1, m[i-1][j]+1);
-    }
+// 4. Squeeze – collapse any letter repeated more than twice to exactly two
+function squeeze(str) {
+  return str.replace(/([a-z])\1{2,}/g, '$1$1');
+}
+
+// 5. Entropy Check – detect keyboard smashing and extract the likely core word
+function entropyPrune(str) {
+  // Look for repeated bigrams (e.g., "ckckck" -> "ck")
+  const bigramRepeated = /(.{2})\1{2,}/g;
+  let cleaned = str.replace(bigramRepeated, '$1');
+  // Remove any remaining alternating patterns like "fufufu"
+  cleaned = cleaned.replace(/(.{2})\1{2,}/g, '$1');
+  // If after pruning the string is very long (>10), trim to first 8 chars as a heuristic
+  if (cleaned.length > 10) cleaned = cleaned.slice(0, 8);
+  return cleaned;
+}
+
+// 6. Sound‑Match – Double Metaphone (simplified but effective)
+function doubleMetaphone(word) {
+  // Pre‑process: convert to lowercase and remove any remaining non‑alpha
+  word = word.toLowerCase().replace(/[^a-z]/g, '');
+  if (word.length === 0) return '';
+
+  // Basic Double Metaphone rules (sufficient for most profanity)
+  const rules = [
+    [/^kn/, 'n'], [/^gn/, 'n'], [/^pn/, 'n'], [/^ae/, 'e'], [/^wr/, 'r'],
+    [/^wh/, 'w'], [/^x/, 's'], [/^c(?=[iey])/, 's'], [/^c/, 'k'],
+    [/^g(?=[iey])/, 'j'], [/^g/, 'k'], [/^d(?=[gj])/, 'j'], [/^ph/, 'f'],
+    [/^qu/, 'k'], [/^s(?=[h])/, 's'], [/^t(?=[ia])/, 'x'], [/^v/, 'f'],
+    [/^w(?=[aeiou])/, 'w'], [/^y/, 'j'], [/^z/, 's'],
+    // Internal rules (simplified)
+    [/sch/g, 'sk'], [/tch/g, 'ch'], [/ck/g, 'k'], [/gh$/, 'f'],
+    [/ght/g, 't'], [/dg/g, 'j'], [/ph/g, 'f'], [/sh/g, 'x'],
+    [/th/g, '0'], [/ch/g, 'x'], [/c(?=[iey])/g, 's'], [/c/g, 'k'],
+    [/g(?=[iey])/g, 'j'], [/g/g, 'k'], [/s(?=[h])/g, 's'],
+    [/t(?=[ia])/g, 'x'], [/d(?=[gj])/g, 'j'], [/ng/g, 'nk'],
+    [/y/g, 'j'], [/z/g, 's'], [/v/g, 'f'], [/w/g, 'w'],
+    // Remove duplicates and vowels (except leading vowel)
+    [/([b-df-hj-np-tv-xz])\1+/g, '$1'],
+    [/[aeiou]/g, '']
+  ];
+
+  let result = word;
+  for (const [pattern, replacement] of rules) {
+    result = result.replace(pattern, replacement);
   }
-  return m[b.length][a.length];
+  // Truncate to first 4 consonants for a stable code
+  return result.slice(0, 4);
 }
 
-function isMatch(word, target){
-  const n = normalize(word);
-  const s = squeeze(n);
-  if(n === target || s === target) return true;
+// 7. Statistical Arbiter – check against safe‑root database and boundary logic
+// We'll maintain a small set of "safe roots" – common words that contain banned substrings.
+const safeRoots = new Set([
+  'pass', 'class', 'grass', 'assassin', 'bass', 'glass', 'mass', 'harass',
+  'assist', 'associate', 'assume', 'assure', 'cassette', 'embarrass',
+  'jackass', 'smartass', 'dumbass'  // these are still profane but context may differ
+]);
 
-  if(s.includes(target)) return true;
+// Master list of banned phonetic codes (pre‑computed for bannedWords)
+const bannedPhonetics = new Set(
+  CONFIG.bannedWords.map(w => {
+    let processed = unicodeScrub(w);
+    processed = leetSwap(processed);
+    processed = despacing(processed);
+    processed = squeeze(processed);
+    processed = entropyPrune(processed);
+    return doubleMetaphone(processed);
+  })
+);
 
-  return levenshtein(s,target) <= 2;
-}
+function isProfane(text) {
+  // Apply layers 1‑5
+  let processed = unicodeScrub(text);
+  processed = leetSwap(processed);
+  processed = despacing(processed);
+  processed = squeeze(processed);
+  processed = entropyPrune(processed);
 
-const trained = CONFIG.bannedWords.map(w=>normalize(w));
-const safeSet = new Set(CONFIG.safeWords.map(w=>normalize(w)));
+  // If the processed string is empty, it's not profane
+  if (processed.length === 0) return false;
 
-function containsProfanity(text){
-  const parts = text.split(/\s+/);
-  for(let p of parts){
-    const norm = normalize(p);
-    // Skip safe words
-    if(safeSet.has(norm)) continue;
-    for(let t of trained){
-      if(isMatch(p,t)) return true;
+  // Layer 6: get phonetic code
+  const phonetic = doubleMetaphone(processed);
+  if (!phonetic) return false;
+
+  // Layer 7: Statistical Arbiter – check safe roots
+  // If the phonetic code matches a banned word, but the original text
+  // contains a safe root as a substring (and the banned word is a substring
+  // of that safe root), then override.
+  if (bannedPhonetics.has(phonetic)) {
+    // Check safe roots in the original (lowercase, no leet)
+    const lowerOriginal = text.toLowerCase();
+    for (const safe of safeRoots) {
+      if (lowerOriginal.includes(safe)) {
+        // Ensure the banned substring is wholly inside the safe root
+        for (const banned of CONFIG.bannedWords) {
+          if (safe.includes(banned)) {
+            return false;   // safe override
+          }
+        }
+      }
     }
+    return true;
   }
   return false;
 }
+
+// Legacy function renamed for compatibility
+const containsProfanity = isProfane;
 
 // ==================== SRV ====================
 async function resolveServer() {
@@ -125,26 +201,16 @@ async function resolveServer() {
     const srv = await dns.resolveSrv(`_minecraft._tcp.${CONFIG.server.host}`);
     if (srv.length) {
       const r = srv[0];
-
       log(`SRV FOUND → port ${r.port}`);
       dbg(`SRV target (ignored): ${r.name}`);
-
-      return {
-        host: CONFIG.server.host,
-        port: r.port
-      };
+      return { host: CONFIG.server.host, port: r.port };
     }
   } catch (e) {
     dbg('SRV failed:', e.code);
   }
-
   const ip = await dns.lookup(CONFIG.server.host);
   log(`A → ${ip.address}`);
-
-  return {
-    host: CONFIG.server.host,
-    port: CONFIG.server.port
-  };
+  return { host: CONFIG.server.host, port: CONFIG.server.port };
 }
 
 // ==================== PORT SCAN ====================
@@ -161,7 +227,6 @@ function testPort(host,port){
 
 async function findPort(host,base){
   if(!CONFIG.debug.probePorts) return base;
-
   for(let p of [base,...CONFIG.debug.ports]){
     dbg(`Testing ${host}:${p}`);
     if(await testPort(host,p)){
@@ -172,7 +237,7 @@ async function findPort(host,base){
   return base;
 }
 
-// ==================== CHAT AI (ONLY CHAT) ====================
+// ==================== CHAT AI ====================
 async function chatReply(sender,msg){
   try{
     const res = await chatGroq.chat.completions.create({
@@ -183,10 +248,8 @@ async function chatReply(sender,msg){
       model: CONFIG.groq.chatModel,
       max_tokens: 60
     });
-
     let reply = res.choices[0]?.message?.content?.trim();
     if(!reply || reply.includes('[IGNORE]')) return;
-
     bot.chat(reply);
   }catch(e){ err('Chat API:',e.message); }
 }
@@ -198,15 +261,12 @@ function say(text){
     bot.chat(text);
     return;
   }
-
   let remaining = text;
   let delay = 0;
-
   while(remaining.length){
     let chunk = remaining.slice(0,CONFIG.chat.max_length);
     const lastSpace = chunk.lastIndexOf(' ');
     if(lastSpace > 100) chunk = chunk.slice(0,lastSpace);
-
     setTimeout(()=>bot.chat(chunk),delay);
     delay += 400;
     remaining = remaining.slice(chunk.length).trim();
@@ -243,7 +303,7 @@ async function createBot(){
     const text = stripColorCodes(rawText);
     log('CHAT:', text);
 
-    // --- Automatic login when server asks for password ---
+    // --- Automatic login ---
     if (!isLoggedIn && !loginSent) {
       if (text.includes('Use the command /login') || text.includes('/login <password>')) {
         log('Login prompt detected – sending password...');
@@ -253,13 +313,10 @@ async function createBot(){
       }
     }
 
-    // Detect successful login
     if (!isLoggedIn && (text.includes('You have successfully logged') || text.includes('You are already logged in'))) {
       isLoggedIn = true;
       loginSent = true;
       log('Login confirmed.');
-
-      // Auto-switch to target server after a short delay (once)
       if (!autoSwitchDone && CONFIG.server.targetServer) {
         autoSwitchDone = true;
         setTimeout(() => {
@@ -272,20 +329,16 @@ async function createBot(){
       return;
     }
 
-    // --- Parse actual player chat ---
+    // --- Parse player chat ---
     const match = text.match(/^([^:]+?):\s(.+)$/);
     if (!match) return;
-
     const sender = match[1].trim();
     const message = match[2].trim();
-
     if (sender === CONFIG.server.username) return;
 
-    // ===== PROFANITY MODERATION =====
+    // ===== 7‑LAYER PROFANITY DETECTION =====
     if (containsProfanity(message)) {
       log(`PROFANITY → ${sender}: ${message}`);
-
-      // Cooldown check (30 seconds)
       const now = Date.now();
       const last = muteCooldown.get(sender) || 0;
       if (now - last < 30000) {
@@ -293,7 +346,6 @@ async function createBot(){
         return;
       }
       muteCooldown.set(sender, now);
-
       say(`/tempmute ${sender} 10m Automod: Profanity detected`);
       return;
     }
@@ -306,7 +358,6 @@ async function createBot(){
 
   bot.on('error', e => err(e.message));
   bot.on('kicked', r => err('Kicked:', r));
-
   bot.on('end', () => {
     log('Reconnect in 10s...');
     setTimeout(createBot, 10000);
