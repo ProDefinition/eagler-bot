@@ -1,6 +1,7 @@
 const mineflayer = require('mineflayer');
 const readline = require('readline');
 const { Groq } = require('groq-sdk');
+const dns = require('dns').promises;
 
 // Suppress annoying console spam
 ['log', 'warn', 'error'].forEach((method) => {
@@ -15,21 +16,18 @@ const { Groq } = require('groq-sdk');
 const CONFIG = {
   engine: 'Polaris v2.1',
   server: {
-    host: 'play.pcsmp.net',
+    host: 'play.pcsmp.net',        // Will be resolved to IP
     port: 25565,
     username: 'Habibi',
     version: '1.12.2',
-    skipValidation: true,  // Fix for SRV record DNS errors
   },
   chat: {
     max_length: 250,
   },
   groq: {
-    // Only used for conversational responses (optional – bot runs without it)
     chatApiKey: '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',
     chatModel: 'llama-3.1-8b-instant',
   },
-  // LOCAL BANNED WORD LIST – Add or remove words here
   bannedWords: [
     'fuck', 'shit', 'cunt', 'nigger', 'faggot', 'asshole', 'bitch', 'dick', 'pussy',
     'whore', 'slut', 'bastard', 'retard', 'kys', 'kill yourself', 'nazi', 'hitler'
@@ -52,10 +50,9 @@ const MAX_RPM = 28;
 let chatGroq = null;
 let groqAvailable = false;
 
-// Content filter data (normalized word -> original word)
 const trainedWords = new Map();
 
-// ==================== CONTENT FILTER LOGIC (from HTML demo) ====================
+// ==================== CONTENT FILTER LOGIC ====================
 const charMap = new Map([
   ["0", "o"], ["1", "i"], ["2", "z"], ["3", "e"], ["4", "a"],
   ["5", "s"], ["6", "g"], ["7", "t"], ["8", "b"], ["9", "g"],
@@ -157,7 +154,6 @@ function tokenize(text) {
 function containsProfanity(text) {
   if (trainedWords.size === 0) return false;
 
-  // Check spaced bypass: collapse all spaces and test against whole string
   const hasSpaces = /\s/.test(text);
   if (hasSpaces) {
     const noSpace = text.replace(/\s+/g, "");
@@ -166,7 +162,6 @@ function containsProfanity(text) {
     }
   }
 
-  // Check each token
   const parts = tokenize(text);
   for (const part of parts) {
     if (/^\s+$/.test(part)) continue;
@@ -177,7 +172,6 @@ function containsProfanity(text) {
   return false;
 }
 
-// Load local banned words into the map
 function loadLocalBannedWords() {
   CONFIG.bannedWords.forEach(word => {
     const normalized = normalizeWord(word);
@@ -186,7 +180,7 @@ function loadLocalBannedWords() {
   console.log(`[${CONFIG.engine}] 📚 Local profanity filter loaded: ${trainedWords.size} words.`);
 }
 
-// ==================== GROQ CHAT (conversation only) ====================
+// ==================== GROQ CHAT ====================
 const CHAT_SYSTEM_PROMPT = `
 You are 'Habibi', a Minecraft server administrator. You are realistic and grounded.
 
@@ -262,16 +256,34 @@ function say(text) {
   }, 250);
 }
 
-// ==================== BOT CREATION ====================
-function createBot() {
+// ==================== BOT CREATION WITH DNS RESOLUTION ====================
+async function resolveHost(hostname) {
+  try {
+    const { address } = await dns.lookup(hostname, { family: 4 });
+    console.log(`[${CONFIG.engine}] 🌐 Resolved ${hostname} → ${address}`);
+    return address;
+  } catch (err) {
+    console.warn(`[${CONFIG.engine}] ⚠️ DNS lookup failed for ${hostname}, using hostname directly.`);
+    return hostname;
+  }
+}
+
+async function createBot() {
   console.log(`[${CONFIG.engine}] Connecting...`);
 
+  // Resolve host to IP to bypass SRV records
+  const resolvedHost = await resolveHost(CONFIG.server.host);
+
   bot = mineflayer.createBot({
-    host: CONFIG.server.host,
+    host: resolvedHost,
     port: CONFIG.server.port,
     username: CONFIG.server.username,
     version: CONFIG.server.version,
-    skipValidation: CONFIG.server.skipValidation,  // Added to fix SRV DNS errors
+    // Skip SRV/A record validation entirely
+    skipValidation: true,
+    // Disable SRV lookup (available in newer mineflayer versions)
+    // If your mineflayer version doesn't support this, it's harmless.
+    srvLookup: false
   });
 
   bot.once('spawn', async () => {
@@ -343,7 +355,6 @@ function createBot() {
       return;
     }
 
-    // Ignore server messages
     const isServerMessage = /^\[(Server|INFO|WARN|ERROR|System)\]/i.test(text) ||
                             /^\*{3}/.test(text) ||
                             /^\[[+\-]\]/.test(text) ||
@@ -355,7 +366,6 @@ function createBot() {
                             /Welcome back!/i.test(text);
     if (isServerMessage) return;
 
-    // Extract sender and message
     let sender = null;
     let message = null;
 
@@ -388,13 +398,11 @@ function createBot() {
     chatHistory.push({ time: new Date().toLocaleTimeString(), sender, message });
     if (chatHistory.length > MAX_HISTORY) chatHistory.shift();
 
-    // ========== CONTENT FILTER (local profanity list) ==========
     if (containsProfanity(message)) {
       console.log(`[${CONFIG.engine}] 🚫 Profanity detected from ${sender}: "${message}"`);
       say(`/tempmute ${sender} 10m Automod: Profanity detected`);
     }
 
-    // ========== GROQ CONVERSATION (if mentioned) ==========
     if (message.toLowerCase().includes(CONFIG.server.username.toLowerCase())) {
       handleChatResponse(sender, message);
     }
@@ -424,10 +432,8 @@ function createBot() {
 async function boot() {
   console.log(`\n[${CONFIG.engine}] 🚀 Initializing...`);
 
-  // Load local banned word list
   loadLocalBannedWords();
 
-  // Initialize Groq for conversation (optional)
   try {
     chatGroq = new Groq({ apiKey: CONFIG.groq.chatApiKey });
     await chatGroq.models.list();
