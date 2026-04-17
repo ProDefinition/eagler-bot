@@ -96,21 +96,33 @@ function containsProfanity(text){
 }
 
 // ==================== SRV ====================
-async function resolveServer(){
-  try{
+async function resolveServer() {
+  try {
     const srv = await dns.resolveSrv(`_minecraft._tcp.${CONFIG.server.host}`);
-    if(srv.length){
+    if (srv.length) {
       const r = srv[0];
-      log(`SRV → ${r.name}:${r.port}`);
-      return {host:r.name,port:r.port};
+
+      log(`SRV FOUND → port ${r.port}`);
+      dbg(`SRV target (ignored): ${r.name}`);
+
+      // IMPORTANT: use ORIGINAL HOST, NOT SRV HOST
+      return {
+        host: CONFIG.server.host,
+        port: r.port
+      };
     }
-  }catch(e){ dbg('SRV failed'); }
+  } catch (e) {
+    dbg('SRV failed:', e.code);
+  }
 
   const ip = await dns.lookup(CONFIG.server.host);
   log(`A → ${ip.address}`);
-  return {host:ip.address,port:CONFIG.server.port};
-}
 
+  return {
+    host: CONFIG.server.host,
+    port: CONFIG.server.port
+  };
+}
 // ==================== PORT SCAN ====================
 function testPort(host,port){
   return new Promise(res=>{
