@@ -370,7 +370,7 @@ async function createBot(){
       log(`PROFANITY → ${sender}: ${message}`);
       const now = Date.now();
       const last = muteCooldown.get(sender) || 0;
-      if (now - last < 30000) {
+      if (now - last < 2000) {
         log(`Mute cooldown active for ${sender}, skipping.`);
         return;
       }
