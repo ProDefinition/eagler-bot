@@ -1,12 +1,6 @@
 const mineflayer = require('mineflayer');
 const readline = require('readline');
 const { Groq } = require('groq-sdk');
-const { initializeApp } = require('firebase/app');
-const {
-  getFirestore,
-  collection,
-  onSnapshot
-} = require('firebase/firestore');
 
 // Suppress annoying console spam
 ['log', 'warn', 'error'].forEach((method) => {
@@ -34,18 +28,11 @@ const CONFIG = {
     chatApiKey: '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',
     chatModel: 'llama-3.1-8b-instant',
   },
-  // Firestore config – exactly as provided, used ONLY for the content filter word list
-  firebase: {
-    apiKey: "AIzaSyDG8nlhwqgXRrUh-q2vBSAzFm44oms2Lk",
-    authDomain: "polaris-358ae.firebaseapp.com",
-    projectId: "polaris-358ae",
-    storageBucket: "polaris-358ae.firebasestorage.app",
-    messagingSenderId: "271470173567",
-    appId: "1:271470173567:web:384b170f1b760a75de4e4a",
-    measurementId: "G-1SVRGR6N07"
-  },
-  // Fallback word list if Firestore is unavailable
-  fallbackBannedWords: ['fuck', 'shit', 'cunt', 'nigger', 'faggot', 'asshole', 'bitch', 'dick', 'pussy']
+  // LOCAL BANNED WORD LIST – Add or remove words here
+  bannedWords: [
+    'fuck', 'shit', 'cunt', 'nigger', 'faggot', 'asshole', 'bitch', 'dick', 'pussy',
+    'whore', 'slut', 'bastard', 'retard', 'kys', 'kill yourself', 'nazi', 'hitler'
+  ]
 };
 
 // ==================== GLOBAL STATE ====================
@@ -64,45 +51,8 @@ const MAX_RPM = 28;
 let chatGroq = null;
 let groqAvailable = false;
 
-// Content filter data (synced from Firestore)
-const trainedWords = new Map(); // normalized -> original word
-let filterReady = false;
-
-// ==================== FIREBASE INIT (Content Filter) ====================
-const firebaseApp = initializeApp(CONFIG.firebase);
-const db = getFirestore(firebaseApp);
-const trainedWordsCollection = collection(db, 'trainedWords');
-
-// Fallback: load hardcoded words if Firestore fails
-function loadFallbackWords() {
-  CONFIG.fallbackBannedWords.forEach(word => {
-    const normalized = normalizeWord(word);
-    if (normalized) trainedWords.set(normalized, word);
-  });
-  filterReady = true;
-  console.log(`[${CONFIG.engine}] ⚠️ Using fallback banned word list (${trainedWords.size} words).`);
-}
-
-// Real-time sync from Firestore
-try {
-  onSnapshot(trainedWordsCollection, (snapshot) => {
-    trainedWords.clear();
-    snapshot.forEach((doc) => {
-      const data = doc.data();
-      const original = data.word || doc.id;
-      const normalized = data.normalized || normalizeWord(original);
-      if (normalized) trainedWords.set(normalized, original);
-    });
-    filterReady = true;
-    console.log(`[${CONFIG.engine}] 📚 Content filter synced: ${trainedWords.size} trained words.`);
-  }, (error) => {
-    console.error(`[${CONFIG.engine}] ❌ Firestore error: ${error.message}. Using fallback list.`);
-    loadFallbackWords();
-  });
-} catch (err) {
-  console.error(`[${CONFIG.engine}] ❌ Failed to initialize Firestore: ${err.message}. Using fallback list.`);
-  loadFallbackWords();
-}
+// Content filter data (normalized word -> original word)
+const trainedWords = new Map();
 
 // ==================== CONTENT FILTER LOGIC (from HTML demo) ====================
 const charMap = new Map([
@@ -130,7 +80,7 @@ function normalizeWord(value) {
   return String(value || "")
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[\u200B-\u200D\uFEFF\u200C\u2028\u2029\u00A0\u1680\u180E\u2000-\u200F\u202F\u205F\u3000\u2060\uFEFF\u034F\u180E\u200B\u200C\u200D\u200E\u200F\u202A-\u202E\u2060-\u2064\u206A-\u206F\uFFF9-\uFFFB\u034F\u180E]/g, "")
+    .replace(/[\u200B-\u200D\uFEFF\u200C\u2028\u2029\u00A0\u1680\u180E\u2000-\u200F\u202F\u205F\u3000\u2060\u2061\u2062\u2063\u2064\u206A-\u206F\uFFF9-\uFFFB]/g, "")
     .toLowerCase()
     .split("")
     .map(ch => charMap.get(ch) ?? ch)
@@ -204,7 +154,7 @@ function tokenize(text) {
 }
 
 function containsProfanity(text) {
-  if (!filterReady) return false; // Wait for filter to load
+  if (trainedWords.size === 0) return false;
 
   // Check spaced bypass: collapse all spaces and test against whole string
   const hasSpaces = /\s/.test(text);
@@ -224,6 +174,15 @@ function containsProfanity(text) {
     }
   }
   return false;
+}
+
+// Load local banned words into the map
+function loadLocalBannedWords() {
+  CONFIG.bannedWords.forEach(word => {
+    const normalized = normalizeWord(word);
+    if (normalized) trainedWords.set(normalized, word);
+  });
+  console.log(`[${CONFIG.engine}] 📚 Local profanity filter loaded: ${trainedWords.size} words.`);
 }
 
 // ==================== GROQ CHAT (conversation only) ====================
@@ -264,7 +223,7 @@ async function handleChatResponse(sender, message) {
     console.log(`[${CONFIG.engine} Chat] Responded to ${sender}: ${reply}`);
   } catch (error) {
     console.error(`[${CONFIG.engine} Chat] API Error: ${error.message}`);
-    if (error.status === 401) groqAvailable = false; // Key invalid, disable further attempts
+    if (error.status === 401) groqAvailable = false;
   }
 }
 
@@ -382,7 +341,7 @@ function createBot() {
       return;
     }
 
-    // Ignore server messages to avoid false positives
+    // Ignore server messages
     const isServerMessage = /^\[(Server|INFO|WARN|ERROR|System)\]/i.test(text) ||
                             /^\*{3}/.test(text) ||
                             /^\[[+\-]\]/.test(text) ||
@@ -427,10 +386,9 @@ function createBot() {
     chatHistory.push({ time: new Date().toLocaleTimeString(), sender, message });
     if (chatHistory.length > MAX_HISTORY) chatHistory.shift();
 
-    // ========== CONTENT FILTER (local, Firestore-powered) ==========
+    // ========== CONTENT FILTER (local profanity list) ==========
     if (containsProfanity(message)) {
       console.log(`[${CONFIG.engine}] 🚫 Profanity detected from ${sender}: "${message}"`);
-      // Mute for 10 minutes
       say(`/tempmute ${sender} 10m Automod: Profanity detected`);
     }
 
@@ -463,6 +421,9 @@ function createBot() {
 // ==================== STARTUP ====================
 async function boot() {
   console.log(`\n[${CONFIG.engine}] 🚀 Initializing...`);
+
+  // Load local banned word list
+  loadLocalBannedWords();
 
   // Initialize Groq for conversation (optional)
   try {
