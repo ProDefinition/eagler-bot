@@ -19,13 +19,14 @@ const CONFIG = {
     port: 25565,
     username: 'Habibi',
     version: '1.12.2',
+    skipValidation: true,  // Fix for SRV record DNS errors
   },
   chat: {
     max_length: 250,
   },
   groq: {
     // Only used for conversational responses (optional – bot runs without it)
-    chatApiKey: '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',
+    chatApiKey: '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',
     chatModel: 'llama-3.1-8b-instant',
   },
   // LOCAL BANNED WORD LIST – Add or remove words here
@@ -270,6 +271,7 @@ function createBot() {
     port: CONFIG.server.port,
     username: CONFIG.server.username,
     version: CONFIG.server.version,
+    skipValidation: CONFIG.server.skipValidation,  // Added to fix SRV DNS errors
   });
 
   bot.once('spawn', async () => {
