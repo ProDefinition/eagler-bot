@@ -19,7 +19,8 @@ const CONFIG = {
     port: 25565,
     username: 'Habibi',
     version: '1.12.2',
-    password: '551417114'
+    password: '551417114',
+    targetServer: 'lifesteal'      // auto-join this server after login
   },
 
   chat: { max_length: 250 },
@@ -37,6 +38,15 @@ const CONFIG = {
   bannedWords: [
     'fuck','shit','cunt','nigger','faggot','asshole','bitch','dick','pussy',
     'whore','slut','bastard','retard','kys','kill yourself','nazi','hitler'
+  ],
+
+  // Words that will never be flagged as profanity (case-insensitive, normalized)
+  safeWords: [
+    'what', 'hi', 'hello', 'hey', 'program', 'debug', 'debugging',
+    'kill', 'die', 'dead', 'death', 'rn', 'right', 'now', 'nah',
+    'ok', 'okay', 'yes', 'no', 'maybe', 'dont', 'dont', 'cant',
+    'wont', 'im', 'youre', 'hes', 'shes', 'its', 'we', 'they',
+    'this', 'that', 'there', 'here', 'where', 'when', 'why', 'how'
   ]
 };
 
@@ -44,16 +54,20 @@ const CONFIG = {
 let bot;
 let isReady = false;
 let isLoggedIn = false;
-let loginSent = false;               // prevent multiple login attempts
+let loginSent = false;
+let autoSwitchDone = false;
 
 const chatGroq = new Groq({ apiKey: CONFIG.groq.chatApiKey });
+
+// Cooldown map to prevent repeated mutes within 30 seconds
+const muteCooldown = new Map();
 
 // ==================== UTIL: STRIP MINECRAFT COLOUR CODES ====================
 function stripColorCodes(str) {
   return str.replace(/§[0-9a-fk-or]/g, '');
 }
 
-// ==================== ADVANCED FILTER ====================
+// ==================== ADVANCED FILTER (WITH SAFE WORD WHITELIST) ====================
 const charMap = new Map([
   ["0","o"],["1","i"],["3","e"],["4","a"],["5","s"],["@","a"],["$","s"],["!","i"]
 ]);
@@ -90,10 +104,14 @@ function isMatch(word, target){
 }
 
 const trained = CONFIG.bannedWords.map(w=>normalize(w));
+const safeSet = new Set(CONFIG.safeWords.map(w=>normalize(w)));
 
 function containsProfanity(text){
   const parts = text.split(/\s+/);
   for(let p of parts){
+    const norm = normalize(p);
+    // Skip safe words
+    if(safeSet.has(norm)) continue;
     for(let t of trained){
       if(isMatch(p,t)) return true;
     }
@@ -111,7 +129,6 @@ async function resolveServer() {
       log(`SRV FOUND → port ${r.port}`);
       dbg(`SRV target (ignored): ${r.name}`);
 
-      // IMPORTANT: use ORIGINAL HOST, NOT SRV HOST
       return {
         host: CONFIG.server.host,
         port: r.port
@@ -129,6 +146,7 @@ async function resolveServer() {
     port: CONFIG.server.port
   };
 }
+
 // ==================== PORT SCAN ====================
 function testPort(host,port){
   return new Promise(res=>{
@@ -200,6 +218,7 @@ async function createBot(){
   loginSent = false;
   isReady = false;
   isLoggedIn = false;
+  autoSwitchDone = false;
 
   log('Resolving...');
   const resolved = await resolveServer();
@@ -217,12 +236,11 @@ async function createBot(){
   bot.on('spawn', () => {
     log('Spawned');
     isReady = true;
-    // Login will be triggered by the server prompt, not a fixed timer.
   });
 
   bot.on('message', (msg) => {
     const rawText = msg.toString();
-    const text = stripColorCodes(rawText);   // remove colour codes for reliable parsing
+    const text = stripColorCodes(rawText);
     log('CHAT:', text);
 
     // --- Automatic login when server asks for password ---
@@ -233,29 +251,49 @@ async function createBot(){
         loginSent = true;
         return;
       }
-      // Already logged in message – prevent future attempts
-      if (text.includes('You have successfully logged') || text.includes('You are already logged in')) {
-        isLoggedIn = true;
-        loginSent = true;
-        return;
+    }
+
+    // Detect successful login
+    if (!isLoggedIn && (text.includes('You have successfully logged') || text.includes('You are already logged in'))) {
+      isLoggedIn = true;
+      loginSent = true;
+      log('Login confirmed.');
+
+      // Auto-switch to target server after a short delay (once)
+      if (!autoSwitchDone && CONFIG.server.targetServer) {
+        autoSwitchDone = true;
+        setTimeout(() => {
+          if (bot) {
+            log(`Switching to ${CONFIG.server.targetServer}...`);
+            bot.chat(`/server ${CONFIG.server.targetServer}`);
+          }
+        }, 2000);
       }
+      return;
     }
 
     // --- Parse actual player chat ---
-    // Format expected: "Sender: message"  (no angle brackets, may include rank like "MOD Chew")
     const match = text.match(/^([^:]+?):\s(.+)$/);
     if (!match) return;
 
     const sender = match[1].trim();
     const message = match[2].trim();
 
-    // Ignore own messages
     if (sender === CONFIG.server.username) return;
 
     // ===== PROFANITY MODERATION =====
     if (containsProfanity(message)) {
       log(`PROFANITY → ${sender}: ${message}`);
-      // Use /tempmute (adjust command if your server uses /mute)
+
+      // Cooldown check (30 seconds)
+      const now = Date.now();
+      const last = muteCooldown.get(sender) || 0;
+      if (now - last < 30000) {
+        log(`Mute cooldown active for ${sender}, skipping.`);
+        return;
+      }
+      muteCooldown.set(sender, now);
+
       say(`/tempmute ${sender} 10m Automod: Profanity detected`);
       return;
     }
