@@ -1,17 +1,11 @@
 const mineflayer = require('mineflayer');
 const readline = require('readline');
 const { Groq } = require('groq-sdk');
+const admin = require('firebase-admin');
 
-['log', 'warn', 'error'].forEach((method) => {
-  const original = console[method];
-  console[method] = function(...args) {
-    if (args.length && typeof args[0] === 'string' && args[0].includes('Ignoring block entities')) return;
-    original.apply(console, args);
-  };
-});
-
+// ==================== CONFIGURATION ====================
 const CONFIG = {
-  engine: 'Solaris v1.4',
+  engine: 'Polaris v2.0',
   server: {
     host: 'play.pcsmp.net',
     port: 25565,
@@ -19,112 +13,260 @@ const CONFIG = {
     version: '1.12.2',
   },
   chat: {
-    max_length: 250,  
+    max_length: 250,
   },
   groq: {
-    modApiKeys: [
-      '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'
-    ],
-    chatApiKey: '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',
-    model: 'llama-3.3-70b-versatile',
+    chatApiKey: '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',
     chatModel: 'llama-3.1-8b-instant',
-    smartScan: {
-      maxBuffer: 15,    // Scan INSTANTLY if buffer hits this many messages
-      maxWaitMs: 7000   // Otherwise, wait this long for slow chat to bundle up
-    }
-  }
+  },
+  // Content filter thresholds
+  filter: {
+    warnOnFirstOffense: true,
+    muteDuration: '10m',
+  },
+  // RTDB paths
+  rtdb: {
+    statusPath: '/status',
+    commandsPath: '/commands',
+    logsPath: '/logs',
+    chatIncomingPath: '/chat/incoming',   // from game to dashboard
+    chatOutgoingPath: '/chat/outgoing',   // from dashboard to game
+  },
 };
 
+// ==================== FIREBASE INIT ====================
+// Initialize Firebase Admin with a service account.
+// IMPORTANT: Place your serviceAccountKey.json in the same directory.
+const serviceAccount = require('./serviceAccountKey.json');
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+  databaseURL: 'https://polaris-358ae-default-rtdb.firebaseio.com',
+});
+
+const db = admin.database();
+const firestore = admin.firestore();
+
+// References
+const statusRef = db.ref(CONFIG.rtdb.statusPath);
+const commandsRef = db.ref(CONFIG.rtdb.commandsPath);
+const logsRef = db.ref(CONFIG.rtdb.logsPath);
+const chatIncomingRef = db.ref(CONFIG.rtdb.chatIncomingPath);
+const chatOutgoingRef = db.ref(CONFIG.rtdb.chatOutgoingPath);
+
+// ==================== CONTENT FILTER (FIRESTORE) ====================
+// Character map from the HTML demo (leetspeak + homoglyphs)
+const charMap = new Map([
+  ["0", "o"], ["1", "i"], ["2", "z"], ["3", "e"], ["4", "a"],
+  ["5", "s"], ["6", "g"], ["7", "t"], ["8", "b"], ["9", "g"],
+  ["@", "a"], ["$", "s"], ["!", "i"], ["|", "i"], ["+", "t"],
+  ["(", "c"], [")", "c"], ["€", "e"], ["£", "l"], ["¥", "y"],
+  ["%", "o"], ["#", "h"], ["&", "a"], ["*", "x"], ["?", "i"],
+  // Cyrillic
+  ["а", "a"], ["б", "b"], ["в", "b"], ["г", "r"], ["д", "d"],
+  ["е", "e"], ["ё", "e"], ["ж", "j"], ["з", "z"], ["и", "i"],
+  ["й", "y"], ["к", "k"], ["л", "l"], ["м", "m"], ["н", "n"],
+  ["о", "o"], ["п", "p"], ["р", "p"], ["с", "c"], ["т", "t"],
+  ["у", "y"], ["ф", "f"], ["х", "x"], ["ц", "c"], ["ч", "ch"],
+  ["ш", "sh"], ["щ", "sh"], ["ъ", "b"], ["ы", "y"], ["ь", "b"],
+  ["э", "e"], ["ю", "yu"], ["я", "ya"],
+  // Greek
+  ["α", "a"], ["β", "b"], ["γ", "g"], ["δ", "d"], ["ε", "e"],
+  ["ζ", "z"], ["η", "n"], ["θ", "o"], ["ι", "i"], ["κ", "k"],
+  ["λ", "l"], ["μ", "m"], ["ν", "v"], ["ξ", "x"], ["ο", "o"],
+  ["π", "p"], ["ρ", "p"], ["σ", "s"], ["τ", "t"], ["υ", "y"],
+  ["φ", "f"], ["χ", "x"], ["ψ", "ps"], ["ω", "o"],
+  ["ⅼ", "l"], ["ⅰ", "i"], ["ⅴ", "v"], ["ⅹ", "x"]
+]);
+
+function normalizeWord(value) {
+  return String(value || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[\u200B-\u200D\uFEFF\u200C\u2028\u2029\u00A0\u1680\u180E\u2000-\u200F\u202F\u205F\u3000\u2060\uFEFF\u034F\u180E\u200B\u200C\u200D\u200E\u200F\u202A-\u202E\u2060-\u2064\u206A-\u206F\uFFF9-\uFFFB\u034F\u180E]/g, "")
+    .toLowerCase()
+    .split("")
+    .map(ch => charMap.get(ch) ?? ch)
+    .join("")
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function squeezeRuns(value) {
+  return String(value || "").replace(/(.)\1+/g, "$1");
+}
+
+function isSubsequence(needle, haystack) {
+  if (!needle || !haystack) return false;
+  let i = 0, j = 0;
+  while (i < needle.length && j < haystack.length) {
+    if (needle[i] === haystack[j]) i++;
+    j++;
+  }
+  return i === needle.length;
+}
+
+function levenshtein(a, b) {
+  a = String(a || ""); b = String(b || "");
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  if (a.length > b.length) [a, b] = [b, a];
+  const prev = new Array(a.length + 1);
+  for (let i = 0; i <= a.length; i++) prev[i] = i;
+  for (let j = 1; j <= b.length; j++) {
+    let diag = prev[0];
+    prev[0] = j;
+    for (let i = 1; i <= a.length; i++) {
+      const temp = prev[i];
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      prev[i] = Math.min(prev[i] + 1, prev[i - 1] + 1, diag + cost);
+      diag = temp;
+    }
+  }
+  return prev[a.length];
+}
+
+function isObfuscated(raw, compact, squeezed) {
+  return raw !== compact || compact !== squeezed || /[^a-zA-Z0-9]/.test(raw) || /(.)\1{2,}/.test(raw);
+}
+
+function isMatch(rawChunk, targetNorm) {
+  const compact = normalizeWord(rawChunk);
+  if (!compact || !targetNorm) return false;
+  const squeezed = squeezeRuns(compact);
+  if (compact === targetNorm || squeezed === targetNorm) return true;
+
+  const obfuscated = isObfuscated(rawChunk, compact, squeezed);
+  if (obfuscated && (compact.includes(targetNorm) || squeezed.includes(targetNorm) || isSubsequence(targetNorm, squeezed))) {
+    return true;
+  }
+
+  const len = targetNorm.length;
+  const maxDist = len <= 3 ? 0 : len <= 5 ? 1 : len <= 8 ? 2 : 3;
+  return levenshtein(squeezed, targetNorm) <= maxDist;
+}
+
+// Trained words from Firestore
+const trainedWords = new Map(); // normalized -> original
+
+// Listen to Firestore for trained words
+firestore.collection('trainedWords').onSnapshot(snapshot => {
+  trainedWords.clear();
+  snapshot.forEach(doc => {
+    const data = doc.data();
+    const original = data.word || doc.id;
+    const normalized = data.normalized || normalizeWord(original);
+    if (normalized) trainedWords.set(normalized, original);
+  });
+  console.log(`[${CONFIG.engine}] Loaded ${trainedWords.size} trained words.`);
+}, err => {
+  console.error(`[${CONFIG.engine}] Firestore error: ${err.message}`);
+});
+
+// Check if a message contains any banned word
+function containsBannedWord(text) {
+  // Collapse spaces to catch spaced bypass (e.g., "f u c k")
+  const hasSpaces = /\s/.test(text);
+  let collapsed = null;
+  if (hasSpaces) {
+    collapsed = text.replace(/\s+/g, '');
+  }
+
+  for (const [normWord, original] of trainedWords.entries()) {
+    // Check individual tokens (simulate tokenization)
+    const tokens = text.split(/(\s+)/);
+    for (const token of tokens) {
+      if (/^\s+$/.test(token)) continue;
+      if (isMatch(token, normWord)) return { word: original };
+    }
+    // Check collapsed version for spaced bypass
+    if (collapsed && isMatch(collapsed, normWord)) {
+      return { word: original, bypass: true };
+    }
+  }
+  return null;
+}
+
+// ==================== BOT STATE ====================
 let bot = null;
 let isInGame = false;
 let isLoggedIn = false;
-let isReady = false; 
+let isReady = false;
 
 const chatHistory = [];
-const MAX_HISTORY = 15; 
-const warnedPlayers = new Set(); 
+const MAX_HISTORY = 15;
+const warnedPlayers = new Set();
 
-const chatTimestamps = [];
-const MAX_RPM = 28; 
-
-let modClients = CONFIG.groq.modApiKeys.map(key => new Groq({ apiKey: key }));
-let currentModClientIndex = 0;
-let modTimestamps = Array(CONFIG.groq.modApiKeys.length).fill().map(() => []);
-
+// Groq for chat responses only
 const chatGroq = new Groq({ apiKey: CONFIG.groq.chatApiKey });
-
-let chunkBuffer = [];
-let isProcessingChunk = false;
-let scanTimer = null; 
-
-const SYSTEM_PROMPT = `
-You are a moderation engine for a Minecraft server. Evaluate a CHUNK of recent chat messages.
-
-RULES:
-1. IGNORE MINOR OFFENSES: Do not punish shouting (caps), demanding behavior, or mild spam.
-2. ZERO TOLERANCE FOR PROFANITY: You MUST issue a "MUTE" for ANY cuss words, swearing, slurs, or highly offensive language. Do not let any cursing slide.
-
-Analyze the chunk. Return a strictly formatted JSON OBJECT containing a "punishments" array.
-If no rules were broken, return an empty array inside the object: {"punishments": []}
-
-Format exactly like this:
-{
-  "punishments": [
-    {
-      "action": "WARN",
-      "target": "username",
-      "duration": "10m",
-      "reason": "Brief reason",
-      "quote": "The exact chat message that broke the rule"
-    }
-  ]
-}
-`;
+const chatTimestamps = [];
+const MAX_RPM = 28;
 
 const CHAT_SYSTEM_PROMPT = `
 You are 'Habibi', a Minecraft server administrator. You are realistic and grounded.
 
 PERSONALITY:
 - Speak casually, like a normal person. Use lowercase occasionally.
-- Keep responses concise. 
+- Keep responses concise.
 - Ignore nonsensical or annoying messages by responding with exactly "[IGNORE]".
 - Responses must be under 140 characters. No emojis.
 `;
 
-// --- API VERIFICATION ---
-async function verifyApiKeys() {
-  console.log(`\n[${CONFIG.engine}] 🔐 Verifying Groq API Keys...`);
-  
-  try {
-    await chatGroq.models.list();
-    console.log(`[${CONFIG.engine}] ✅ Chat API Key is functioning properly.`);
-  } catch (error) {
-    console.error(`[${CONFIG.engine}] ❌ Chat API Key FAILED: ${error.message}`);
-  }
-
-  const validModClients = [];
-  const validModTimestamps = [];
-
-  for (let i = 0; i < modClients.length; i++) {
-    try {
-      await modClients[i].models.list();
-      console.log(`[${CONFIG.engine}] ✅ Mod API Key ${i + 1} is functioning properly.`);
-      validModClients.push(modClients[i]);
-      validModTimestamps.push([]);
-    } catch (error) {
-      console.error(`[${CONFIG.engine}] ❌ Mod API Key ${i + 1} FAILED: ${error.message}. Removing from rotation.`);
+// ==================== UTILS ====================
+function logEvent(type, data) {
+  const entry = {
+    timestamp: admin.database.ServerValue.TIMESTAMP,
+    type,
+    ...data,
+  };
+  logsRef.push(entry);
+  // Keep only last 500 logs to save space
+  logsRef.limitToLast(500).once('value', snap => {
+    if (snap.numChildren() > 500) {
+      const firstKey = Object.keys(snap.val())[0];
+      logsRef.child(firstKey).remove();
     }
-  }
+  });
+}
 
-  modClients = validModClients;
-  modTimestamps = validModTimestamps;
+function say(text) {
+  if (!bot || !text) return;
+  text = text.replace(/[\n\r]/g, ' ').trim();
 
-  if (modClients.length === 0) {
-    console.error(`\n[${CONFIG.engine}] 🚨 FATAL: All Moderation API keys failed. The bot cannot moderate. Shutting down...`);
-    process.exit(1);
-  }
-  
-  console.log(`[${CONFIG.engine}] 🟢 Key verification complete. Starting bot...\n`);
+  setTimeout(() => {
+    if (text.length <= CONFIG.chat.max_length) {
+      bot.chat(text);
+      // Log outgoing chat to dashboard
+      chatIncomingRef.push({
+        sender: CONFIG.server.username,
+        message: text,
+        timestamp: admin.database.ServerValue.TIMESTAMP,
+        type: 'bot',
+      });
+      return;
+    }
+
+    let remaining = text;
+    let delay = 0;
+    while (remaining.length > 0) {
+      let chunk = remaining.slice(0, CONFIG.chat.max_length);
+      const lastSpace = chunk.lastIndexOf(' ');
+      if (lastSpace > CONFIG.chat.max_length / 2) chunk = chunk.slice(0, lastSpace);
+
+      setTimeout(() => {
+        bot.chat(chunk);
+        chatIncomingRef.push({
+          sender: CONFIG.server.username,
+          message: chunk,
+          timestamp: admin.database.ServerValue.TIMESTAMP,
+          type: 'bot',
+        });
+      }, delay);
+
+      delay += 500;
+      remaining = remaining.slice(chunk.length).trim();
+    }
+  }, 250);
 }
 
 async function enforceRateLimit(timestampsArray) {
@@ -132,138 +274,57 @@ async function enforceRateLimit(timestampsArray) {
   while (timestampsArray.length > 0 && now - timestampsArray[0] > 60000) {
     timestampsArray.shift();
   }
-
   if (timestampsArray.length >= MAX_RPM) {
     const waitTime = 60000 - (now - timestampsArray[0]) + 100;
     await new Promise(r => setTimeout(r, waitTime));
-    return enforceRateLimit(timestampsArray); 
+    return enforceRateLimit(timestampsArray);
   }
-
   timestampsArray.push(Date.now());
 }
 
-function handlePunishment(decision, target) {
-  if (!decision || decision.action === 'NONE') return;
-  
-  let baseReason = decision.reason || 'Policy violation';
-  let quoteText = decision.quote ? ` - "${decision.quote}"` : '';
-  
-  if (quoteText.length > 60) {
-    quoteText = quoteText.substring(0, 57) + '..."';
-  }
-  
-  const fullReason = `Automod: ${baseReason}${quoteText}`;
-  
-  switch (decision.action.toUpperCase()) {
-    case 'WARN':
-      if (warnedPlayers.has(target)) {
-        say(`/tempmute ${target} 10m ${fullReason} (Ignored Warning)`);
-        console.log(`[${CONFIG.engine}] 🔨 Escalated ${target} to MUTE.`);
-      } else {
-        warnedPlayers.add(target);
-        say(`${target}, warning: ${baseReason}. next offense is a mute.`);
-        console.log(`[${CONFIG.engine}] ⚠️ Warned ${target}.`);
-      }
-      break;
-    case 'MUTE':
-      const duration = decision.duration || '10m';
-      say(`/tempmute ${target} ${duration} ${fullReason}`);
-      console.log(`[${CONFIG.engine}] 🔇 Muted ${target} for reason: ${fullReason}`);
-      break;
-    case 'KICK':
-      say(`/kick ${target} ${fullReason}`);
-      console.log(`[${CONFIG.engine}] 🥾 Kicked ${target}.`);
-      break;
+// ==================== PUNISHMENT HANDLER ====================
+function handlePunishment(target, matchedWord, message) {
+  const reason = `Inappropriate language (${matchedWord})`;
+  const quote = message.length > 50 ? message.substring(0, 47) + '...' : message;
+
+  if (warnedPlayers.has(target)) {
+    // Escalate to mute
+    say(`/tempmute ${target} ${CONFIG.filter.muteDuration} Automod: ${reason} - "${quote}"`);
+    logEvent('mute', { target, reason, quote });
+    console.log(`[${CONFIG.engine}] 🔇 Muted ${target} for: ${reason}`);
+  } else {
+    warnedPlayers.add(target);
+    say(`${target}, warning: ${reason}. Next offense is a mute.`);
+    logEvent('warn', { target, reason, quote });
+    console.log(`[${CONFIG.engine}] ⚠️ Warned ${target}.`);
   }
 }
 
-// --- SMART DYNAMIC SCANNER ---
-function triggerSmartScan() {
-  if (isProcessingChunk) return;
-  
-  if (chunkBuffer.length >= CONFIG.groq.smartScan.maxBuffer) {
-    processChunkScanner();
-  } 
-  else if (!scanTimer && chunkBuffer.length > 0) {
-    scanTimer = setTimeout(() => {
-      processChunkScanner();
-    }, CONFIG.groq.smartScan.maxWaitMs);
-  }
-}
-
-async function processChunkScanner() {
-  if (scanTimer) {
-    clearTimeout(scanTimer);
-    scanTimer = null;
+// ==================== CHAT PROCESSING ====================
+function processChatMessage(sender, message) {
+  // 1. Content Filter
+  const banned = containsBannedWord(message);
+  if (banned) {
+    handlePunishment(sender, banned.word, message);
   }
 
-  if (isProcessingChunk || chunkBuffer.length === 0) return;
-  isProcessingChunk = true;
+  // 2. Log to RTDB for dashboard
+  chatIncomingRef.push({
+    sender,
+    message,
+    timestamp: admin.database.ServerValue.TIMESTAMP,
+    type: 'player',
+    flagged: !!banned,
+  });
 
-  // FIX: Drop extremely old messages so moderation stays real-time
-  if (chunkBuffer.length > 150) {
-    console.warn(`[${CONFIG.engine}] ⚠️ Buffer overloaded! Dropping ${chunkBuffer.length - 150} old messages to catch up.`);
-    chunkBuffer = chunkBuffer.slice(-150);
+  // 3. Respond if bot is mentioned
+  if (message.toLowerCase().includes(CONFIG.server.username.toLowerCase())) {
+    handleChatResponse(sender, message);
   }
 
-  const messagesToScan = Math.min(chunkBuffer.length, 50);
-  console.log(`[${CONFIG.engine}] 🔍 Smart scanning ${messagesToScan} messages...`);
-
-  const chunkToProcess = chunkBuffer.splice(0, 50);
-  const formattedChunk = chunkToProcess.map(item => `Sender: ${item.sender} | Message: "${item.message}"`).join('\n');
-  
-  const keyIndex = currentModClientIndex;
-  const currentGroq = modClients[keyIndex];
-  currentModClientIndex = (currentModClientIndex + 1) % modClients.length;
-
-  try {
-    await enforceRateLimit(modTimestamps[keyIndex]);
-
-    const response = await currentGroq.chat.completions.create({
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: `EVALUATE THIS CHUNK:\n\n${formattedChunk}` }
-      ],
-      model: CONFIG.groq.model,
-      temperature: 0.0, 
-      response_format: { type: "json_object" }, 
-      max_tokens: 300,  
-    });
-
-    const reply = response.choices[0]?.message?.content || '{"punishments": []}';
-    const cleanReply = reply.replace(/```json/gi, '').replace(/```/g, '').trim();
-
-    try {
-      const parsedData = JSON.parse(cleanReply);
-      const decisions = parsedData.punishments || [];
-      
-      if (Array.isArray(decisions) && decisions.length > 0) {
-        console.log(`[${CONFIG.engine}] 🛑 Scan complete. Found ${decisions.length} violation(s).`);
-        decisions.forEach(decision => handlePunishment(decision, decision.target));
-      } else {
-        console.log(`[${CONFIG.engine}] ✅ Scan complete. No violations found.`);
-      }
-    } catch (parseError) {
-      console.error(`[${CONFIG.engine}] JSON parse failed. Raw snippet: ${cleanReply.substring(0, 50)}...`);
-    }
-
-  } catch (error) {
-    if (error.status === 429) {
-       console.warn(`[${CONFIG.engine}] ⚠️ API Rate Limit (429) hit. Backing off for 5 seconds...`);
-       // Put messages back at the front so they aren't lost
-       chunkBuffer = [...chunkToProcess, ...chunkBuffer];
-       // FIX: Pause execution to prevent an infinite API spam loop
-       await new Promise(r => setTimeout(r, 5000));
-    } else {
-       console.error(`[${CONFIG.engine}] Moderation API Error: ${error.message}`);
-    }
-  }
-
-  isProcessingChunk = false;
-  
-  if (chunkBuffer.length > 0) {
-    triggerSmartScan();
-  }
+  // 4. Keep history
+  chatHistory.push({ time: new Date().toLocaleTimeString(), sender, message });
+  if (chatHistory.length > MAX_HISTORY) chatHistory.shift();
 }
 
 async function handleChatResponse(sender, message) {
@@ -276,50 +337,82 @@ async function handleChatResponse(sender, message) {
         { role: 'user', content: `${sender}: ${message}` }
       ],
       model: CONFIG.groq.chatModel,
-      temperature: 0.9, 
+      temperature: 0.9,
       max_tokens: 60,
     });
 
     let reply = response.choices[0]?.message?.content?.trim();
-
     if (!reply || reply.includes('[IGNORE]') || reply === '...') return;
-    
+
     if (Math.random() > 0.5) {
       reply = reply.toLowerCase().replace(/[.!?]$/, "");
     }
 
     say(reply);
-    console.log(`[${CONFIG.engine} Chat] Responded to ${sender}: ${reply}`);
   } catch (error) {
     console.error(`[${CONFIG.engine} Chat] API Error: ${error.message}`);
   }
 }
 
-function say(text) {
-  if (!bot || !text) return;
-  text = text.replace(/[\n\r]/g, ' ').trim();
-  
-  setTimeout(() => {
-    if (text.length <= CONFIG.chat.max_length) {
-      bot.chat(text);
-      return;
+// ==================== RTDB COMMAND LISTENER ====================
+function listenForCommands() {
+  commandsRef.on('child_added', async (snapshot) => {
+    const cmd = snapshot.val();
+    const key = snapshot.key;
+    if (!cmd || cmd.processed) return;
+
+    // Mark as processed to avoid duplicate execution
+    await commandsRef.child(key).update({ processed: true });
+
+    console.log(`[${CONFIG.engine}] Received command:`, cmd);
+
+    try {
+      switch (cmd.type) {
+        case 'say':
+          if (cmd.message) say(cmd.message);
+          break;
+        case 'execute':
+          if (cmd.command) bot.chat(cmd.command);
+          break;
+        case 'kick':
+          if (cmd.player) say(`/kick ${cmd.player} ${cmd.reason || 'Staff action'}`);
+          break;
+        case 'mute':
+          if (cmd.player) say(`/tempmute ${cmd.player} ${cmd.duration || '10m'} ${cmd.reason || 'Staff action'}`);
+          break;
+        default:
+          console.warn(`Unknown command type: ${cmd.type}`);
+      }
+    } catch (err) {
+      console.error('Command execution error:', err);
     }
 
-    let remaining = text;
-    let delay = 0;
-    while (remaining.length > 0) {
-      let chunk = remaining.slice(0, CONFIG.chat.max_length);
-      const lastSpace = chunk.lastIndexOf(' ');
-      if (lastSpace > CONFIG.chat.max_length / 2) chunk = chunk.slice(0, lastSpace);
-      
-      setTimeout(() => bot.chat(chunk), delay);
-      
-      delay += 500; 
-      remaining = remaining.slice(chunk.length).trim();
-    }
-  }, 250);
+    // Remove command after processing
+    setTimeout(() => commandsRef.child(key).remove(), 1000);
+  });
 }
 
+// ==================== STATUS UPDATER ====================
+function startStatusUpdates() {
+  const update = () => {
+    if (!bot || !isReady) return;
+    const players = Object.values(bot.players).map(p => p.username);
+    statusRef.set({
+      online: true,
+      server: CONFIG.server.host,
+      username: CONFIG.server.username,
+      players: players,
+      playerCount: players.length,
+      health: bot.health,
+      food: bot.food,
+      lastUpdate: admin.database.ServerValue.TIMESTAMP,
+    });
+  };
+  update();
+  setInterval(update, 5000);
+}
+
+// ==================== BOT CREATION ====================
 function createBot() {
   console.log(`[${CONFIG.engine}] Connecting...`);
 
@@ -339,20 +432,21 @@ function createBot() {
     if (!isLoggedIn) {
       let attempts = 0;
       while (!isLoggedIn && attempts < 15) {
-          await new Promise(r => setTimeout(r, 1000));
-          attempts++;
+        await new Promise(r => setTimeout(r, 1000));
+        attempts++;
       }
     }
 
     bot.setControlState('jump', true);
     await new Promise(r => setTimeout(r, 300));
     bot.setControlState('jump', false);
-
     await new Promise(r => setTimeout(r, 3000));
 
     console.log(`[${CONFIG.engine}] Ready.`);
     isReady = true;
+    startStatusUpdates();
 
+    // Anti-AFK
     setInterval(() => {
       if (!bot.entity || !isInGame) return;
       if (Math.random() < 0.1) {
@@ -367,7 +461,8 @@ function createBot() {
     isInGame = false;
     isLoggedIn = false;
     isReady = false;
-    setTimeout(createBot, 15000); 
+    statusRef.update({ online: false });
+    setTimeout(createBot, 15000);
   });
 
   bot.on('error', (err) => console.log(`[Error] ${err.message}`));
@@ -378,8 +473,6 @@ function createBot() {
     if (!text || text.length > 500) return;
 
     const lower = text.toLowerCase();
-    
-    if (lower.includes('ignoring block entities')) return;
 
     if (!isLoggedIn && lower.includes('/login')) {
       say('/login 551417114');
@@ -399,6 +492,7 @@ function createBot() {
       return;
     }
 
+    // Ignore server messages
     const isServerMessage = /^\[(Server|INFO|WARN|ERROR|System)\]/i.test(text) ||
                             /^\*{3}/.test(text) ||
                             /^\[[+\-]\]/.test(text) ||
@@ -410,14 +504,15 @@ function createBot() {
                             /Welcome back!/i.test(text);
     if (isServerMessage) return;
 
+    // Parse sender and message
     let sender = null;
     let message = null;
 
     const cleanText = text.replace(/^(?:\[[^\]]+\]\s*)*(?:MOD|HELPER|SRHELPER|OWNER|ADMIN|COOWNER|BUILDER|VIP|MVP|YOUTUBE|DEFAULT)\s+/i, '').trim();
-    
+
     const matchVanilla = cleanText.match(/^<~?([a-zA-Z0-9_]{3,16})>\s*(.+)/);
     const matchPrefix = cleanText.match(/^~?([a-zA-Z0-9_]{3,16})\s*[:»\->]\s*(.+)/);
-    
+
     if (matchVanilla) {
       sender = matchVanilla[1];
       message = matchVanilla[2];
@@ -438,20 +533,11 @@ function createBot() {
     if (!sender || !message || sender === CONFIG.server.username || sender === 'detected') return;
 
     console.log(`[LIVE CHAT] ${sender}: ${message}`);
-
-    chatHistory.push({ time: new Date().toLocaleTimeString(), sender, message });
-    if (chatHistory.length > MAX_HISTORY) chatHistory.shift();
-
-    chunkBuffer.push({ sender, message });
-    triggerSmartScan();
-
-    if (message.toLowerCase().includes(CONFIG.server.username.toLowerCase())) {
-        handleChatResponse(sender, message);
-    }
+    processChatMessage(sender, message);
   });
 
   bot.on('health', () => {
-    if (!isReady) return; 
+    if (!isReady) return;
     if (bot.food < 14) {
       const food = bot.inventory.items().find(item =>
         item.name.includes('apple') || item.name.includes('bread') ||
@@ -464,27 +550,29 @@ function createBot() {
     }
   });
 
-  bot.on('windowOpen', async (window) => {
+  bot.on('windowOpen', async () => {
     await new Promise(r => setTimeout(r, 500));
     if (bot.currentWindow) bot.clickWindow(1, 0, 0);
   });
 }
 
+// ==================== SHUTDOWN ====================
 function shutdown() {
   console.log(`\n[${CONFIG.engine}] Shutting down...`);
-  if (bot) bot.quit(); 
-  setTimeout(() => process.exit(0), 500); 
+  statusRef.update({ online: false });
+  if (bot) bot.quit();
+  setTimeout(() => process.exit(0), 500);
 }
 
-process.on('SIGINT', shutdown);  
-process.on('SIGTERM', shutdown); 
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
 
+// Console input
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout,
   prompt: 'Console> ',
 });
-
 rl.prompt();
 rl.on('line', (line) => {
   const msg = line.trim();
@@ -495,13 +583,21 @@ rl.on('line', (line) => {
   }
   rl.prompt();
 });
+rl.on('close', shutdown);
 
-rl.on('close', () => {
-  shutdown();
-});
-
+// ==================== BOOT ====================
 async function boot() {
-  await verifyApiKeys();
+  console.log(`[${CONFIG.engine}] Starting...`);
+  // Verify Groq chat key
+  try {
+    await chatGroq.models.list();
+    console.log(`[${CONFIG.engine}] ✅ Chat API Key is valid.`);
+  } catch (error) {
+    console.error(`[${CONFIG.engine}] ❌ Chat API Key FAILED: ${error.message}`);
+    process.exit(1);
+  }
+
+  listenForCommands();
   createBot();
 }
 
