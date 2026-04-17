@@ -23,11 +23,9 @@ const CONFIG = {
   },
   groq: {
     modApiKeys: [
-      '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',
-      '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',
-      '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'
+      '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'
     ],
-    chatApiKey: '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',
+    chatApiKey: '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',
     model: 'llama-3.3-70b-versatile',
     chatModel: 'llama-3.1-8b-instant',
     smartScan: {
