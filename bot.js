@@ -25,7 +25,7 @@ const CONFIG = {
   chat: { max_length: 250 },
 
   groq: {
-    chatApiKey: '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', //do not ever remove the api keys.
+    chatApiKey: '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',
     chatModel: 'llama-3.1-8b-instant'
   },
 
@@ -44,8 +44,14 @@ const CONFIG = {
 let bot;
 let isReady = false;
 let isLoggedIn = false;
+let loginSent = false;               // prevent multiple login attempts
 
 const chatGroq = new Groq({ apiKey: CONFIG.groq.chatApiKey });
+
+// ==================== UTIL: STRIP MINECRAFT COLOUR CODES ====================
+function stripColorCodes(str) {
+  return str.replace(/§[0-9a-fk-or]/g, '');
+}
 
 // ==================== ADVANCED FILTER ====================
 const charMap = new Map([
@@ -191,6 +197,10 @@ function say(text){
 
 // ==================== BOT ====================
 async function createBot(){
+  loginSent = false;
+  isReady = false;
+  isLoggedIn = false;
+
   log('Resolving...');
   const resolved = await resolveServer();
   const port = await findPort(resolved.host,resolved.port);
@@ -204,43 +214,64 @@ async function createBot(){
     version: CONFIG.server.version
   });
 
-  bot.on('spawn',()=>{
+  bot.on('spawn', () => {
     log('Spawned');
-    setTimeout(()=>bot.chat(`/login ${CONFIG.server.password}`),2000);
     isReady = true;
+    // Login will be triggered by the server prompt, not a fixed timer.
   });
 
-  bot.on('message',msg=>{
-    const text = msg.toString();
-    log('CHAT:',text);
+  bot.on('message', (msg) => {
+    const rawText = msg.toString();
+    const text = stripColorCodes(rawText);   // remove colour codes for reliable parsing
+    log('CHAT:', text);
 
-    const match = text.match(/<(.+?)>\s(.+)/);
-    if(!match) return;
+    // --- Automatic login when server asks for password ---
+    if (!isLoggedIn && !loginSent) {
+      if (text.includes('Use the command /login') || text.includes('/login <password>')) {
+        log('Login prompt detected – sending password...');
+        bot.chat(`/login ${CONFIG.server.password}`);
+        loginSent = true;
+        return;
+      }
+      // Already logged in message – prevent future attempts
+      if (text.includes('You have successfully logged') || text.includes('You are already logged in')) {
+        isLoggedIn = true;
+        loginSent = true;
+        return;
+      }
+    }
 
-    const sender = match[1];
-    const message = match[2];
+    // --- Parse actual player chat ---
+    // Format expected: "Sender: message"  (no angle brackets, may include rank like "MOD Chew")
+    const match = text.match(/^([^:]+?):\s(.+)$/);
+    if (!match) return;
 
-    if(sender === CONFIG.server.username) return;
+    const sender = match[1].trim();
+    const message = match[2].trim();
 
-    // ===== CONTENT FILTER (MODERATION ONLY) =====
-    if(containsProfanity(message)){
+    // Ignore own messages
+    if (sender === CONFIG.server.username) return;
+
+    // ===== PROFANITY MODERATION =====
+    if (containsProfanity(message)) {
       log(`PROFANITY → ${sender}: ${message}`);
+      // Use /tempmute (adjust command if your server uses /mute)
       say(`/tempmute ${sender} 10m Automod: Profanity detected`);
       return;
     }
 
-    // ===== GROQ (CHAT ONLY) =====
-    if(message.toLowerCase().includes(CONFIG.server.username.toLowerCase())){
-      chatReply(sender,message);
+    // ===== CHAT RESPONSE (AI) =====
+    if (message.toLowerCase().includes(CONFIG.server.username.toLowerCase())) {
+      chatReply(sender, message);
     }
   });
 
-  bot.on('error',e=>err(e.message));
-  bot.on('kicked',r=>err('Kicked:',r));
+  bot.on('error', e => err(e.message));
+  bot.on('kicked', r => err('Kicked:', r));
 
-  bot.on('end',()=>{
+  bot.on('end', () => {
     log('Reconnect in 10s...');
-    setTimeout(createBot,10000);
+    setTimeout(createBot, 10000);
   });
 }
 
@@ -250,8 +281,8 @@ const rl = readline.createInterface({
   output: process.stdout
 });
 
-rl.on('line',line=>{
-  if(bot) bot.chat(line);
+rl.on('line', line => {
+  if (bot) bot.chat(line);
 });
 
 // ==================== START ====================
