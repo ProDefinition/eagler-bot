@@ -14,9 +14,9 @@ const dns = require('dns').promises;
 
 // ==================== CONFIGURATION ====================
 const CONFIG = {
-  engine: 'Polaris v2.1',
+  engine: 'Polaris v2.2',
   server: {
-    host: 'play.pcsmp.net',        // Will be resolved to IP
+    host: '135.148.168.66',        // Will be resolved to IP
     port: 25565,
     username: 'Habibi',
     version: '1.12.2',
