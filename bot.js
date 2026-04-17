@@ -25,7 +25,7 @@ const CONFIG = {
   },
   chat: { max_length: 250 },
   groq: {
-    chatApiKey: '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',
+    chatApiKey: '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',
     chatModel: 'llama-3.1-8b-instant',
   },
   filter: { warnOnFirstOffense: true, muteDuration: '10m' },
