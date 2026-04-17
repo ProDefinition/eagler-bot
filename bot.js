@@ -25,7 +25,7 @@ const CONFIG = {
   chat: { max_length: 250 },
 
   groq: {
-    chatApiKey: 'PUT_YOUR_KEY_HERE',
+    chatApiKey: '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', //do not ever remove the api keys.
     chatModel: 'llama-3.1-8b-instant'
   },
 
