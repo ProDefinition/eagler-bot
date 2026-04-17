@@ -180,8 +180,9 @@ const normalizedBanned = CONFIG.bannedWords.map(w => {
 });
 
 // 7. Statistical Arbiter – algorithmic, NO SAFE LIST
+// 7. Statistical Arbiter – algorithmic, NO SAFE LIST
 function isProfane(text) {
-  // Apply layers 1‑5 to the whole input text
+  // Layers 1-5: clean the text
   let processed = unicodeScrub(text);
   processed = leetSwap(processed);
   processed = despacing(processed);
@@ -190,41 +191,23 @@ function isProfane(text) {
 
   if (processed.length === 0) return false;
 
-  // Layer 6: phonetic code
-  const phonetic = doubleMetaphone(processed);
-  if (!phonetic) return false;
-
-  // Only consider a phonetic match as suspicious
-  if (!bannedPhonetics.has(phonetic)) return false;
-
-  // ===== ALGORITHMIC ARBITER =====
-  // 1. Length gate: words shorter than 4 chars after processing must be exact match to a banned word
-  if (processed.length < 4) {
-    return normalizedBanned.includes(processed);
-  }
-
-  // 2. Edit‑distance check: if the closest banned word is more than 2 edits away, it's safe
-  let minDistance = Infinity;
+  // Direct substring match against every banned word (normalized)
   for (const banned of CONFIG.bannedWords) {
-    const cleanBanned = banned.toLowerCase().replace(/[^a-z]/g, '');
-    const distance = levenshtein(processed, cleanBanned);
-    if (distance < minDistance) minDistance = distance;
-  }
-  if (minDistance > 2) return false;
+    // Normalize banned word the same way
+    let normBanned = unicodeScrub(banned);
+    normBanned = leetSwap(normBanned);
+    normBanned = despacing(normBanned);
+    normBanned = squeeze(normBanned);
+    normBanned = entropyPrune(normBanned);
 
-  // 3. Compound‑word heuristic: if the word is significantly longer than the banned substring,
-  //    it's likely a compound like "classroom" or "bassist". Allow if length difference >= 2.
-  for (const banned of CONFIG.bannedWords) {
-    const cleanBanned = banned.toLowerCase().replace(/[^a-z]/g, '');
-    if (processed.includes(cleanBanned) && processed.length - cleanBanned.length >= 2) {
-      return false;
+    // If the processed text contains the normalized banned word, it's profane
+    if (processed.includes(normBanned)) {
+      return true;
     }
   }
 
-  // All checks passed → profanity confirmed
-  return true;
+  return false;
 }
-
 const containsProfanity = isProfane;
 
 // ==================== SRV ====================
