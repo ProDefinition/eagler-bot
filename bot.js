@@ -26,7 +26,7 @@ const CONFIG = {
   },
   groq: {
     // Only used for conversational responses (optional – bot runs without it)
-    chatApiKey: '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',
+    chatApiKey: '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',
     chatModel: 'llama-3.1-8b-instant',
   },
   // LOCAL BANNED WORD LIST – Add or remove words here
