@@ -12,7 +12,7 @@ const err = (...a) => console.log('[ERROR]', ...a);
 
 // ==================== CONFIG ====================
 const CONFIG = {
-  engine: 'Polaris v4.3',
+  engine: 'Polaris v4.5',
 
   server: {
     host: 'play.pcsmp.net',
@@ -20,7 +20,7 @@ const CONFIG = {
     username: 'Habibi',
     version: '1.12.2',
     password: '551417114',
-    targetServer: 'lifesteal'      // auto-join after login
+    targetServer: 'lifesteal'
   },
 
   chat: { max_length: 250 },
@@ -36,9 +36,31 @@ const CONFIG = {
   },
 
   bannedWords: [
-    'fuck','shit','cunt','nigger','faggot','asshole','bitch','dick','pussy',
-    'whore','slut','bastard','retard','kys','kill yourself','nazi','hitler'
-  ]
+  'fuck', 'fck', 'fuk', 'f**k', 'fucking', 'fucked', 'fucker', 'motherfucker', 'mofo', 'fukboi', 'fukboy', 'fudgepacker',
+  'shit', 'sh1t', 'sh!t', 's**t', 'shitty', 'bullshit', 'bullsh!t', 'dipshit',
+  'ass', 'asshole', 'arse', 'arsehole', 'jackass', 'dumbass', 'smartass', 'badass',
+  'bitch', 'b!tch', 'biatch', 'bitching', 'bitchy', 'sonofabitch',
+  'cunt', 'c**t',
+  'dick', 'd1ck', 'd!ck', 'cock', 'prick',
+  'pussy', 'pusy', 'pussies',
+  'bastard',
+  'douche', 'douchebag', 'douchecanoe',
+  'wanker', 'tosser',
+  'bugger',
+  'hell', 'bloody', 'bloody hell', 'damn', 'goddamn',
+  'piss', 'pissed', 'piss off',
+  'slut', 'whore',
+  'retard', 'retarded',
+  'nigger', 'nigga', 'n1gg3r', 'nigg3r', 'nig-nog', 'coon', 'spic', 'spik', 'kike', 'chink', 'chinky', 'gook', 'gooker', 'goy', 'goyim', 'honky', 'cracker', 'jap', 'paki', 'raghead', 'wop', 'guido', 'dago', 'beaner', 'wetback', 'zipperhead', 'heeb', 'kraut', 'yid', 'gypsy', 'gippo', 'half-breed', 'mulatto', 'oreo', 'uncle tom', 'darky', 'darkie', 'golliwog', 'golly', 'sambo', 'wog', 'boong', 'pikey', 'spade', 'jungle bunny', 'porch monkey', 'sand nigger', 'timber nigger',
+  'faggot', 'fag', 'faggy', 'dyke', 'dike', 'tranny', 'shemale', 'poof', 'poofter',
+  'spaz', 'spastic', 'cripple', 'midget', 'gimp', 'window licker',
+  'infidel', 'christ-killer', 'papist', 'kafir',
+  'hillbilly', 'redneck',
+  'rape', 'raper', 'rapist', 'molest', 'cunnilingus', 'fellatio', 'blowjob', 'bukkake', 'cuck', 'cuckold', 'circlejerk', 'handjob', 'rimjob', 'fisting', 'pegging', 'scat', 'watersports', 'anal', 'analingus', 'clit', 'clitoris', 'penis', 'vagina', 'vulva', 'labia', 'testicles', 'tits', 'titties', 'boobs', 'cum', 'jizz', 'semen', 'sperm', 'precum', 'orgasm', 'masturbate', 'wank', 'jerk off',
+  'kill yourself', 'kys', 'suicide', 'cut yourself', 'go die', 'hang yourself',
+  'pedo', 'pedophile', 'loli', 'lolicon', 'childporn', 'preteen', 'jailbait',
+  'nazi', 'hitler', 'heil hitler', '1488', 'swastika', 'kkk', 'klu klux klan', 'reich', 'fuhrer', 'aryan', 'white power'
+]
 };
 
 // ==================== GLOBAL ====================
@@ -49,8 +71,6 @@ let loginSent = false;
 let autoSwitchDone = false;
 
 const chatGroq = new Groq({ apiKey: CONFIG.groq.chatApiKey });
-
-// Cooldown map to prevent repeated mutes (30 seconds)
 const muteCooldown = new Map();
 
 // ==================== UTIL: STRIP COLOUR CODES ====================
@@ -58,18 +78,30 @@ function stripColorCodes(str) {
   return str.replace(/§[0-9a-fk-or]/g, '');
 }
 
+// ==================== LEVENSHTEIN DISTANCE ====================
+function levenshtein(a, b) {
+  const m = [];
+  for (let i = 0; i <= b.length; i++) m[i] = [i];
+  for (let j = 0; j <= a.length; j++) m[0][j] = j;
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      m[i][j] = b[i - 1] === a[j - 1]
+        ? m[i - 1][j - 1]
+        : Math.min(m[i - 1][j - 1] + 1, m[i][j - 1] + 1, m[i - 1][j] + 1);
+    }
+  }
+  return m[b.length][a.length];
+}
+
 // ==================== 7‑LAYER PROFANITY FILTER ====================
-// ------------------------------------------------------------------
-// 1. Unicode Scrub – NFKD + remove zero‑width spaces and diacritics
+// 1. Unicode Scrub
 function unicodeScrub(str) {
-  // Normalise to decomposed form, then remove combining diacritical marks
   let normalized = str.normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
-  // Remove zero‑width spaces and other invisible characters
   normalized = normalized.replace(/[\u200B-\u200D\uFEFF]/g, '');
   return normalized;
 }
 
-// 2. Leet‑Swap – comprehensive symbol → letter map
+// 2. Leet‑Swap
 const leetMap = new Map([
   ['0','o'], ['1','i'], ['2','z'], ['3','e'], ['4','a'], ['5','s'], ['6','g'],
   ['7','t'], ['8','b'], ['9','g'], ['@','a'], ['$','s'], ['!','i'], ['+','t'],
@@ -80,49 +112,42 @@ function leetSwap(str) {
   return str.toLowerCase().split('').map(c => leetMap.get(c) || c).join('');
 }
 
-// 3. De‑Spacing – remove all non‑alphabetic characters
+// 3. De‑Spacing
 function despacing(str) {
   return str.replace(/[^a-z]/g, '');
 }
 
-// 4. Squeeze – collapse any letter repeated more than twice to exactly two
+// 4. Squeeze
 function squeeze(str) {
   return str.replace(/([a-z])\1{2,}/g, '$1$1');
 }
 
-// 5. Entropy Check – detect keyboard smashing and extract the likely core word
+// 5. Entropy Prune
 function entropyPrune(str) {
-  // Look for repeated bigrams (e.g., "ckckck" -> "ck")
   const bigramRepeated = /(.{2})\1{2,}/g;
   let cleaned = str.replace(bigramRepeated, '$1');
-  // Remove any remaining alternating patterns like "fufufu"
   cleaned = cleaned.replace(/(.{2})\1{2,}/g, '$1');
-  // If after pruning the string is very long (>10), trim to first 8 chars as a heuristic
   if (cleaned.length > 10) cleaned = cleaned.slice(0, 8);
   return cleaned;
 }
 
-// 6. Sound‑Match – Double Metaphone (simplified but effective)
+// 6. Sound‑Match (Double Metaphone – simplified)
 function doubleMetaphone(word) {
-  // Pre‑process: convert to lowercase and remove any remaining non‑alpha
   word = word.toLowerCase().replace(/[^a-z]/g, '');
   if (word.length === 0) return '';
 
-  // Basic Double Metaphone rules (sufficient for most profanity)
   const rules = [
     [/^kn/, 'n'], [/^gn/, 'n'], [/^pn/, 'n'], [/^ae/, 'e'], [/^wr/, 'r'],
     [/^wh/, 'w'], [/^x/, 's'], [/^c(?=[iey])/, 's'], [/^c/, 'k'],
     [/^g(?=[iey])/, 'j'], [/^g/, 'k'], [/^d(?=[gj])/, 'j'], [/^ph/, 'f'],
     [/^qu/, 'k'], [/^s(?=[h])/, 's'], [/^t(?=[ia])/, 'x'], [/^v/, 'f'],
     [/^w(?=[aeiou])/, 'w'], [/^y/, 'j'], [/^z/, 's'],
-    // Internal rules (simplified)
     [/sch/g, 'sk'], [/tch/g, 'ch'], [/ck/g, 'k'], [/gh$/, 'f'],
     [/ght/g, 't'], [/dg/g, 'j'], [/ph/g, 'f'], [/sh/g, 'x'],
     [/th/g, '0'], [/ch/g, 'x'], [/c(?=[iey])/g, 's'], [/c/g, 'k'],
     [/g(?=[iey])/g, 'j'], [/g/g, 'k'], [/s(?=[h])/g, 's'],
     [/t(?=[ia])/g, 'x'], [/d(?=[gj])/g, 'j'], [/ng/g, 'nk'],
     [/y/g, 'j'], [/z/g, 's'], [/v/g, 'f'], [/w/g, 'w'],
-    // Remove duplicates and vowels (except leading vowel)
     [/([b-df-hj-np-tv-xz])\1+/g, '$1'],
     [/[aeiou]/g, '']
   ];
@@ -131,19 +156,10 @@ function doubleMetaphone(word) {
   for (const [pattern, replacement] of rules) {
     result = result.replace(pattern, replacement);
   }
-  // Truncate to first 4 consonants for a stable code
   return result.slice(0, 4);
 }
 
-// 7. Statistical Arbiter – check against safe‑root database and boundary logic
-// We'll maintain a small set of "safe roots" – common words that contain banned substrings.
-const safeRoots = new Set([
-  'pass', 'class', 'grass', 'assassin', 'bass', 'glass', 'mass', 'harass',
-  'assist', 'associate', 'assume', 'assure', 'cassette', 'embarrass',
-  'jackass', 'smartass', 'dumbass'  // these are still profane but context may differ
-]);
-
-// Master list of banned phonetic codes (pre‑computed for bannedWords)
+// Pre‑compute phonetic codes for banned words
 const bannedPhonetics = new Set(
   CONFIG.bannedWords.map(w => {
     let processed = unicodeScrub(w);
@@ -155,44 +171,60 @@ const bannedPhonetics = new Set(
   })
 );
 
+// Normalized banned words (for exact matching)
+const normalizedBanned = CONFIG.bannedWords.map(w => {
+  let n = unicodeScrub(w);
+  n = leetSwap(n);
+  n = despacing(n);
+  return n;
+});
+
+// 7. Statistical Arbiter – algorithmic, NO SAFE LIST
 function isProfane(text) {
-  // Apply layers 1‑5
+  // Apply layers 1‑5 to the whole input text
   let processed = unicodeScrub(text);
   processed = leetSwap(processed);
   processed = despacing(processed);
   processed = squeeze(processed);
   processed = entropyPrune(processed);
 
-  // If the processed string is empty, it's not profane
   if (processed.length === 0) return false;
 
-  // Layer 6: get phonetic code
+  // Layer 6: phonetic code
   const phonetic = doubleMetaphone(processed);
   if (!phonetic) return false;
 
-  // Layer 7: Statistical Arbiter – check safe roots
-  // If the phonetic code matches a banned word, but the original text
-  // contains a safe root as a substring (and the banned word is a substring
-  // of that safe root), then override.
-  if (bannedPhonetics.has(phonetic)) {
-    // Check safe roots in the original (lowercase, no leet)
-    const lowerOriginal = text.toLowerCase();
-    for (const safe of safeRoots) {
-      if (lowerOriginal.includes(safe)) {
-        // Ensure the banned substring is wholly inside the safe root
-        for (const banned of CONFIG.bannedWords) {
-          if (safe.includes(banned)) {
-            return false;   // safe override
-          }
-        }
-      }
-    }
-    return true;
+  // Only consider a phonetic match as suspicious
+  if (!bannedPhonetics.has(phonetic)) return false;
+
+  // ===== ALGORITHMIC ARBITER =====
+  // 1. Length gate: words shorter than 4 chars after processing must be exact match to a banned word
+  if (processed.length < 4) {
+    return normalizedBanned.includes(processed);
   }
-  return false;
+
+  // 2. Edit‑distance check: if the closest banned word is more than 2 edits away, it's safe
+  let minDistance = Infinity;
+  for (const banned of CONFIG.bannedWords) {
+    const cleanBanned = banned.toLowerCase().replace(/[^a-z]/g, '');
+    const distance = levenshtein(processed, cleanBanned);
+    if (distance < minDistance) minDistance = distance;
+  }
+  if (minDistance > 2) return false;
+
+  // 3. Compound‑word heuristic: if the word is significantly longer than the banned substring,
+  //    it's likely a compound like "classroom" or "bassist". Allow if length difference >= 2.
+  for (const banned of CONFIG.bannedWords) {
+    const cleanBanned = banned.toLowerCase().replace(/[^a-z]/g, '');
+    if (processed.includes(cleanBanned) && processed.length - cleanBanned.length >= 2) {
+      return false;
+    }
+  }
+
+  // All checks passed → profanity confirmed
+  return true;
 }
 
-// Legacy function renamed for compatibility
 const containsProfanity = isProfane;
 
 // ==================== SRV ====================
@@ -303,7 +335,6 @@ async function createBot(){
     const text = stripColorCodes(rawText);
     log('CHAT:', text);
 
-    // --- Automatic login ---
     if (!isLoggedIn && !loginSent) {
       if (text.includes('Use the command /login') || text.includes('/login <password>')) {
         log('Login prompt detected – sending password...');
@@ -329,14 +360,12 @@ async function createBot(){
       return;
     }
 
-    // --- Parse player chat ---
     const match = text.match(/^([^:]+?):\s(.+)$/);
     if (!match) return;
     const sender = match[1].trim();
     const message = match[2].trim();
     if (sender === CONFIG.server.username) return;
 
-    // ===== 7‑LAYER PROFANITY DETECTION =====
     if (containsProfanity(message)) {
       log(`PROFANITY → ${sender}: ${message}`);
       const now = Date.now();
@@ -350,7 +379,6 @@ async function createBot(){
       return;
     }
 
-    // ===== CHAT RESPONSE (AI) =====
     if (message.toLowerCase().includes(CONFIG.server.username.toLowerCase())) {
       chatReply(sender, message);
     }
