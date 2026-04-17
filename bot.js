@@ -13,7 +13,7 @@ const { Groq } = require('groq-sdk');
 
 // ==================== CONFIGURATION ====================
 const CONFIG = {
-  engine: 'Polaris v2.0',
+  engine: 'Polaris v2.1',
   server: {
     host: 'play.pcsmp.net',
     port: 25565,
