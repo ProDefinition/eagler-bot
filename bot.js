@@ -20,7 +20,7 @@ const CONFIG = {
   server: {
     host: 'play.pcsmp.net',
     port: 25565,
-    username: 'Habibi',
+    username: 'ChewKok',
     version: '1.12.2',
     password: '551417114',
     targetServer: 'lifesteal'
