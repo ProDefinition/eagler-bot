@@ -11,8 +11,7 @@ const err = (...a) => console.log('[ERROR]', ...a);
 
 // ==================== CONFIG ====================
 const CONFIG = {
-  engine: 'Polaris v6.0',
-
+  engine: 'Polaris v6.5',
   server: {
     host: 'play.pcsmp.net',
     port: 25565,
@@ -21,24 +20,19 @@ const CONFIG = {
     password: '551417114',
     targetServer: 'lifesteal'
   },
-
   chat: { max_length: 250 },
-
   groq: {
     chatApiKey: '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',
     chatModel: 'llama-3.1-8b-instant'
   },
-
   debug: {
     probePorts: true,
     ports: [25565, 25566, 25567, 25570, 25575]
   },
-
   // Mild terms go to logging only. Everything else goes to mute mode.
   softWords: [
     'ass', 'damn', 'hell', 'bloody', 'piss', 'bastard', 'douche', 'wanker', 'bugger'
   ],
-
   bannedWords: [
     'fuck', 'fck', 'fuk', 'f**k', 'fucking', 'fucked', 'fucker', 'motherfucker', 'mofo', 'fukboi', 'fukboy', 'fudgepacker',
     'shit', 'sh1t', 'sh!t', 's**t', 'shitty', 'bullshit', 'bullsh!t', 'dipshit',
@@ -73,7 +67,6 @@ let isReady = false;
 let isLoggedIn = false;
 let loginSent = false;
 let autoSwitchDone = false;
-
 const muteCooldown = new Map();
 
 // ==================== NORMALIZATION ====================
@@ -81,149 +74,167 @@ function normalizeForMatch(input) {
   const map = {
     '0': 'o', '1': 'i', '2': 'z', '3': 'e', '4': 'a',
     '5': 's', '6': 'g', '7': 't', '8': 'b', '9': 'g',
-    '@': 'a', '$': 's', '!': 'i', '+': 't', '#': 'h'
+    '@': 'a', '$': 's', '!': 'i', '+': 't', '#': 'h',
+    '|': 'l', '(': 'c', '[': 'c'
   };
-
-  let out = String(input)
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+  
+  // Strip unicode variations & diacritics
+  let out = String(input).normalize('NFKD')
+    .replace(/[\u0300-\u036f\u200B-\u200D\uFEFF]/g, '')
     .toLowerCase();
-
+    
   let cleaned = '';
-  for (const ch of out) {
-    if (map[ch]) cleaned += map[ch];
-    else if (ch >= 'a' && ch <= 'z') cleaned += ch;
-    else if (/\s/.test(ch)) cleaned += ' ';
-    else cleaned += ' ';
+  for (let i = 0; i < out.length; i++) {
+    const ch = out[i];
+    cleaned += map[ch] || ( (ch >= 'a' && ch <= 'z') ? ch : ' ' );
   }
 
-  cleaned = cleaned
-    .replace(/([a-z])\1{2,}/g, '$1$1')
+  // Deduplicate chars (e.g., "shhhhittt" -> "shit")
+  return cleaned
+    .replace(/([a-z])\1+/g, '$1') 
     .replace(/\s+/g, ' ')
     .trim();
-
-  return cleaned;
 }
 
-// ==================== FAST CUCKOO FILTER ====================
-class CuckooFilter {
-  constructor(capacity = 4096, bucketSize = 4, fingerprintBits = 16, maxKicks = 500) {
-    this.bucketSize = bucketSize;
-    this.maxKicks = maxKicks;
-    this.fingerprintMask = (1 << fingerprintBits) - 1;
-
-    this.numBuckets = 1;
-    const desiredBuckets = Math.ceil(capacity / bucketSize);
+// ==================== PRODUCTION CUCKOO FILTER ====================
+class ProdCuckooFilter {
+  constructor(expectedItems = 4096) {
+    this.bucketSize = 4;
+    this.maxKicks = 500;
+    this.size = 0;
+    
+    // Size to ensure max 85% load factor initially
+    let desiredBuckets = Math.ceil((expectedItems * 1.25) / this.bucketSize);
+    this.numBuckets = 2;
     while (this.numBuckets < desiredBuckets) this.numBuckets <<= 1;
-
+    
     this.mask = this.numBuckets - 1;
-    this.buckets = Array.from({ length: this.numBuckets }, () => []);
+    // High-performance 1D Array to prevent Garbage Collection stutters
+    this.table = new Uint32Array(this.numBuckets * this.bucketSize);
   }
 
-  static fnv1a32(str) {
-    let hash = 0x811c9dc5;
+  // Fast Murmur3-inspired 64-bit split hash function
+  static hashData(str) {
+    let h1 = 0x811c9dc5, h2 = 0x41c6ce57;
     for (let i = 0; i < str.length; i++) {
-      hash ^= str.charCodeAt(i);
-      hash = Math.imul(hash, 0x01000193);
+      let ch = str.charCodeAt(i);
+      h1 = Math.imul(h1 ^ ch, 0x01000193);
+      h2 = Math.imul(h2 ^ ch, 0x1597334677);
     }
-    return hash >>> 0;
+    h1 = (Math.imul(h1 ^ (h1 >>> 16), 0x2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 0x3266489909)) >>> 0;
+    h2 = (Math.imul(h2 ^ (h2 >>> 16), 0x2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 0x3266489909)) >>> 0;
+    return [h1, h2]; // [IndexHash, Fingerprint]
   }
 
-  _hash(str) {
-    return CuckooFilter.fnv1a32(str);
-  }
-
-  _fingerprint(str) {
-    let fp = this._hash(str) & this.fingerprintMask;
-    if (fp === 0) fp = 1;
-    return fp >>> 0;
-  }
-
-  _altIndex(index, fingerprint) {
-    return (index ^ CuckooFilter.fnv1a32(String(fingerprint))) & this.mask;
+  _altIndex(index, fp) {
+    let hash = Math.imul(fp, 0x5bd1e995);
+    hash = hash ^ (hash >>> 15);
+    return (index ^ hash) & this.mask;
   }
 
   insert(item) {
-    const h = this._hash(item);
-    const fp = this._fingerprint(item);
-    const i1 = h & this.mask;
-    const i2 = this._altIndex(i1, fp);
+    const [h, rawFp] = ProdCuckooFilter.hashData(item);
+    let fp = rawFp === 0 ? 1 : rawFp; 
+    let idx1 = h & this.mask;
+    let idx2 = this._altIndex(idx1, fp);
 
-    if (this.buckets[i1].length < this.bucketSize) {
-      this.buckets[i1].push(fp);
-      return true;
+    if (this._insertIntoBucket(idx1, fp) || this._insertIntoBucket(idx2, fp)) {
+      this.size++; return true;
     }
 
-    if (this.buckets[i2].length < this.bucketSize) {
-      this.buckets[i2].push(fp);
-      return true;
-    }
-
-    let index = Math.random() < 0.5 ? i1 : i2;
+    let curIdx = Math.random() < 0.5 ? idx1 : idx2;
     let curFp = fp;
 
     for (let n = 0; n < this.maxKicks; n++) {
-      const bucket = this.buckets[index];
       const slot = Math.floor(Math.random() * this.bucketSize);
-
-      if (bucket.length < this.bucketSize) {
-        bucket.push(curFp);
-        return true;
-      }
-
-      const evicted = bucket[slot];
-      bucket[slot] = curFp;
+      const ptr = (curIdx * this.bucketSize) + slot;
+      
+      const evicted = this.table[ptr];
+      this.table[ptr] = curFp;
       curFp = evicted;
+      
+      curIdx = this._altIndex(curIdx, curFp);
+      if (this._insertIntoBucket(curIdx, curFp)) {
+        this.size++; return true;
+      }
+    }
+    
+    // Auto-expand if bucket collision is too dense
+    this._expand();
+    return this.insert(item);
+  }
 
-      index = this._altIndex(index, curFp);
-
-      if (this.buckets[index].length < this.bucketSize) {
-        this.buckets[index].push(curFp);
+  _insertIntoBucket(index, fp) {
+    const base = index * this.bucketSize;
+    for (let i = 0; i < this.bucketSize; i++) {
+      if (this.table[base + i] === 0) {
+        this.table[base + i] = fp;
         return true;
       }
     }
-
     return false;
   }
 
   contains(item) {
-    const h = this._hash(item);
-    const fp = this._fingerprint(item);
-    const i1 = h & this.mask;
-    const i2 = this._altIndex(i1, fp);
+    const [h, rawFp] = ProdCuckooFilter.hashData(item);
+    const fp = rawFp === 0 ? 1 : rawFp;
+    
+    const idx1 = h & this.mask;
+    const base1 = idx1 * this.bucketSize;
+    if (this.table[base1]===fp || this.table[base1+1]===fp || 
+        this.table[base1+2]===fp || this.table[base1+3]===fp) return true;
 
-    return this.buckets[i1].includes(fp) || this.buckets[i2].includes(fp);
+    const idx2 = this._altIndex(idx1, fp);
+    const base2 = idx2 * this.bucketSize;
+    if (this.table[base2]===fp || this.table[base2+1]===fp || 
+        this.table[base2+2]===fp || this.table[base2+3]===fp) return true;
+
+    return false;
+  }
+
+  _expand() {
+      // Stub - Overridden in buildFilter to re-insert string items safely
   }
 }
 
 function buildFilter(rawTerms) {
-  const normalizedTerms = [];
+  const normalizedTerms = new Set();
   let maxWords = 1;
 
   for (const raw of rawTerms) {
     const term = normalizeForMatch(raw);
     if (!term) continue;
-    normalizedTerms.push(term);
+    normalizedTerms.add(term);
+    
+    // Length-bounded Compaction: Only compact long words to prevent False Positives (like "glass" -> "ass")
+    if (term.replace(/\s+/g, '').length > 4) {
+        normalizedTerms.add(term.replace(/\s+/g, ''));
+    }
     const wordCount = term.split(' ').length;
     if (wordCount > maxWords) maxWords = wordCount;
   }
 
-  const filter = new CuckooFilter(Math.max(4096, normalizedTerms.length * 16));
+  const termsArray = Array.from(normalizedTerms);
+  const filter = new ProdCuckooFilter(Math.max(4096, termsArray.length));
+  
+  // Safe expansion handles filter rebuilding without data loss
+  filter._expand = function() {
+      log(`[Automod] Expanding Cuckoo capacity...`);
+      this.numBuckets <<= 1;
+      this.mask = this.numBuckets - 1;
+      this.table = new Uint32Array(this.numBuckets * this.bucketSize);
+      this.size = 0;
+      for (const term of termsArray) {
+          if (!this.insert(term)) throw new Error("Filter expansion loop!");
+      }
+  };
 
-  for (const term of normalizedTerms) {
-    filter.insert(term);
-
-    const compact = term.replace(/\s+/g, '');
-    if (compact !== term) filter.insert(compact);
-  }
-
+  for (const term of termsArray) filter.insert(term);
   return { filter, maxWords };
 }
 
 const softTermsNormalized = CONFIG.softWords.map(normalizeForMatch).filter(Boolean);
 const softSet = new Set(softTermsNormalized);
-
 const hardWords = CONFIG.bannedWords.filter(raw => {
   const cleaned = normalizeForMatch(raw);
   return cleaned && !softSet.has(cleaned);
@@ -233,52 +244,43 @@ const HARD_INDEX = buildFilter(hardWords);
 const SOFT_INDEX = buildFilter(CONFIG.softWords);
 
 // ==================== MODERATION CLASSIFIER ====================
-function collectCandidates(normalizedText, maxWindow) {
-  const tokens = normalizedText ? normalizedText.split(' ').filter(Boolean) : [];
+function classifyModeration(text) {
+  const normalized = normalizeForMatch(text);
+  if (!normalized) return { hardHits: [], softHits: [] };
+  
+  const tokens = normalized.split(' ').filter(Boolean);
   const candidates = new Set();
-
-  for (const token of tokens) {
-    candidates.add(token);
-  }
-
-  for (let size = 2; size <= maxWindow; size++) {
+  
+  // 1. Safe N-Grams (Exact boundaries)
+  const maxW = Math.max(HARD_INDEX.maxWords, SOFT_INDEX.maxWords);
+  for (let size = 1; size <= maxW; size++) {
     for (let i = 0; i + size <= tokens.length; i++) {
       candidates.add(tokens.slice(i, i + size).join(' '));
     }
   }
 
-  const compact = tokens.join('');
-  if (compact) candidates.add(compact);
-
-  return [...candidates];
-}
-
-function classifyModeration(text) {
-  const normalized = normalizeForMatch(text);
-  if (!normalized) return { hardHits: [], softHits: [] };
-
-  const candidates = collectCandidates(
-    normalized,
-    Math.max(HARD_INDEX.maxWords, SOFT_INDEX.maxWords)
-  );
+  // 2. Sliding Window on Compact Strings (Catches spacing evasion without triggering small false positives)
+  const compactedText = tokens.join('');
+  if (compactedText.length > 4) {
+      candidates.add(compactedText);
+      for(let len = 5; len <= 12 && len <= compactedText.length; len++) {
+          for(let i = 0; i + len <= compactedText.length; i++) {
+              candidates.add(compactedText.substring(i, i + len));
+          }
+      }
+  }
 
   const hardHits = [];
   const softHits = [];
 
   for (const candidate of candidates) {
-    if (HARD_INDEX.filter.contains(candidate)) {
-      hardHits.push(candidate);
-      continue;
-    }
-
-    if (SOFT_INDEX.filter.contains(candidate)) {
-      softHits.push(candidate);
-    }
+    if (HARD_INDEX.filter.contains(candidate)) hardHits.push(candidate);
+    else if (SOFT_INDEX.filter.contains(candidate)) softHits.push(candidate);
   }
 
-  return {
-    hardHits: [...new Set(hardHits)],
-    softHits: [...new Set(softHits)]
+  return { 
+      hardHits: [...new Set(hardHits)], 
+      softHits: [...new Set(softHits)] 
   };
 }
 
@@ -302,7 +304,6 @@ async function resolveServer() {
   } catch (e) {
     dbg('SRV failed:', e.code);
   }
-
   const ip = await dns.lookup(CONFIG.server.host);
   log(`A → ${ip.address}`);
   return { host: CONFIG.server.host, port: CONFIG.server.port };
@@ -335,20 +336,16 @@ async function findPort(host, base) {
 // ==================== SAY ====================
 function say(text) {
   if (!bot) return;
-
   if (text.length <= CONFIG.chat.max_length) {
     bot.chat(text);
     return;
   }
-
   let remaining = text;
   let delay = 0;
-
   while (remaining.length) {
     let chunk = remaining.slice(0, CONFIG.chat.max_length);
     const lastSpace = chunk.lastIndexOf(' ');
     if (lastSpace > 100) chunk = chunk.slice(0, lastSpace);
-
     setTimeout(() => bot.chat(chunk), delay);
     delay += 400;
     remaining = remaining.slice(chunk.length).trim();
@@ -361,13 +358,12 @@ async function createBot() {
   isReady = false;
   isLoggedIn = false;
   autoSwitchDone = false;
-
+  
   log('Resolving...');
   const resolved = await resolveServer();
   const port = await findPort(resolved.host, resolved.port);
-
+  
   log(`CONNECT → ${resolved.host}:${port}`);
-
   bot = mineflayer.createBot({
     host: resolved.host,
     port,
@@ -384,7 +380,7 @@ async function createBot() {
     const rawText = msg.toString();
     const text = stripColorCodes(rawText);
     log('CHAT:', text);
-
+    
     if (!isLoggedIn && !loginSent) {
       if (text.includes('Use the command /login') || text.includes('/login <password>')) {
         log('Login prompt detected – sending password...');
@@ -393,12 +389,11 @@ async function createBot() {
         return;
       }
     }
-
+    
     if (!isLoggedIn && (text.includes('You have successfully logged') || text.includes('You are already logged in'))) {
       isLoggedIn = true;
       loginSent = true;
       log('Login confirmed.');
-
       if (!autoSwitchDone && CONFIG.server.targetServer) {
         autoSwitchDone = true;
         setTimeout(() => {
@@ -408,36 +403,31 @@ async function createBot() {
           }
         }, 2000);
       }
-
       return;
     }
-
+    
     const match = text.match(/^([^:]+?):\s(.+)$/);
     if (!match) return;
-
+    
     const sender = match[1].trim();
     const message = match[2].trim();
-
     if (sender === CONFIG.server.username) return;
-
+    
     const mod = classifyModeration(message);
-
+    
     if (mod.hardHits.length) {
       log(`MUTE HIT → ${sender}: ${message} [${mod.hardHits.join(', ')}]`);
-
       const now = Date.now();
       const last = muteCooldown.get(sender) || 0;
-
       if (now - last < 2000) {
         log(`Mute cooldown active for ${sender}, skipping.`);
         return;
       }
-
       muteCooldown.set(sender, now);
       say(`/tempmute ${sender} 10m Automod: Cuckoo filter match`);
       return;
     }
-
+    
     if (mod.softHits.length) {
       log(`SOFT HIT → ${sender}: ${message} [${mod.softHits.join(', ')}]`);
     }
