@@ -2,7 +2,6 @@ const mineflayer = require('mineflayer');
 const readline = require('readline');
 const dns = require('dns').promises;
 const net = require('net');
-const { Groq } = require('groq-sdk');
 
 // ==================== DEBUG ====================
 const DEBUG = true;
@@ -12,7 +11,7 @@ const err = (...a) => console.log('[ERROR]', ...a);
 
 // ==================== CONFIG ====================
 const CONFIG = {
-  engine: 'Polaris v6.0 – Flawless Mod',
+  engine: 'Polaris v6.0',
 
   server: {
     host: 'play.pcsmp.net',
@@ -34,6 +33,11 @@ const CONFIG = {
     probePorts: true,
     ports: [25565, 25566, 25567, 25570, 25575]
   },
+
+  // Mild terms go to logging only. Everything else goes to mute mode.
+  softWords: [
+    'ass', 'damn', 'hell', 'bloody', 'piss', 'bastard', 'douche', 'wanker', 'bugger'
+  ],
 
   bannedWords: [
     'fuck', 'fck', 'fuk', 'f**k', 'fucking', 'fucked', 'fucker', 'motherfucker', 'mofo', 'fukboi', 'fukboy', 'fudgepacker',
@@ -70,141 +74,220 @@ let isLoggedIn = false;
 let loginSent = false;
 let autoSwitchDone = false;
 
-const chatGroq = new Groq({ apiKey: CONFIG.groq.chatApiKey });
 const muteCooldown = new Map();
+
+// ==================== NORMALIZATION ====================
+function normalizeForMatch(input) {
+  const map = {
+    '0': 'o', '1': 'i', '2': 'z', '3': 'e', '4': 'a',
+    '5': 's', '6': 'g', '7': 't', '8': 'b', '9': 'g',
+    '@': 'a', '$': 's', '!': 'i', '+': 't', '#': 'h'
+  };
+
+  let out = String(input)
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .toLowerCase();
+
+  let cleaned = '';
+  for (const ch of out) {
+    if (map[ch]) cleaned += map[ch];
+    else if (ch >= 'a' && ch <= 'z') cleaned += ch;
+    else if (/\s/.test(ch)) cleaned += ' ';
+    else cleaned += ' ';
+  }
+
+  cleaned = cleaned
+    .replace(/([a-z])\1{2,}/g, '$1$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return cleaned;
+}
+
+// ==================== FAST CUCKOO FILTER ====================
+class CuckooFilter {
+  constructor(capacity = 4096, bucketSize = 4, fingerprintBits = 16, maxKicks = 500) {
+    this.bucketSize = bucketSize;
+    this.maxKicks = maxKicks;
+    this.fingerprintMask = (1 << fingerprintBits) - 1;
+
+    this.numBuckets = 1;
+    const desiredBuckets = Math.ceil(capacity / bucketSize);
+    while (this.numBuckets < desiredBuckets) this.numBuckets <<= 1;
+
+    this.mask = this.numBuckets - 1;
+    this.buckets = Array.from({ length: this.numBuckets }, () => []);
+  }
+
+  static fnv1a32(str) {
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < str.length; i++) {
+      hash ^= str.charCodeAt(i);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    return hash >>> 0;
+  }
+
+  _hash(str) {
+    return CuckooFilter.fnv1a32(str);
+  }
+
+  _fingerprint(str) {
+    let fp = this._hash(str) & this.fingerprintMask;
+    if (fp === 0) fp = 1;
+    return fp >>> 0;
+  }
+
+  _altIndex(index, fingerprint) {
+    return (index ^ CuckooFilter.fnv1a32(String(fingerprint))) & this.mask;
+  }
+
+  insert(item) {
+    const h = this._hash(item);
+    const fp = this._fingerprint(item);
+    const i1 = h & this.mask;
+    const i2 = this._altIndex(i1, fp);
+
+    if (this.buckets[i1].length < this.bucketSize) {
+      this.buckets[i1].push(fp);
+      return true;
+    }
+
+    if (this.buckets[i2].length < this.bucketSize) {
+      this.buckets[i2].push(fp);
+      return true;
+    }
+
+    let index = Math.random() < 0.5 ? i1 : i2;
+    let curFp = fp;
+
+    for (let n = 0; n < this.maxKicks; n++) {
+      const bucket = this.buckets[index];
+      const slot = Math.floor(Math.random() * this.bucketSize);
+
+      if (bucket.length < this.bucketSize) {
+        bucket.push(curFp);
+        return true;
+      }
+
+      const evicted = bucket[slot];
+      bucket[slot] = curFp;
+      curFp = evicted;
+
+      index = this._altIndex(index, curFp);
+
+      if (this.buckets[index].length < this.bucketSize) {
+        this.buckets[index].push(curFp);
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  contains(item) {
+    const h = this._hash(item);
+    const fp = this._fingerprint(item);
+    const i1 = h & this.mask;
+    const i2 = this._altIndex(i1, fp);
+
+    return this.buckets[i1].includes(fp) || this.buckets[i2].includes(fp);
+  }
+}
+
+function buildFilter(rawTerms) {
+  const normalizedTerms = [];
+  let maxWords = 1;
+
+  for (const raw of rawTerms) {
+    const term = normalizeForMatch(raw);
+    if (!term) continue;
+    normalizedTerms.push(term);
+    const wordCount = term.split(' ').length;
+    if (wordCount > maxWords) maxWords = wordCount;
+  }
+
+  const filter = new CuckooFilter(Math.max(4096, normalizedTerms.length * 16));
+
+  for (const term of normalizedTerms) {
+    filter.insert(term);
+
+    const compact = term.replace(/\s+/g, '');
+    if (compact !== term) filter.insert(compact);
+  }
+
+  return { filter, maxWords };
+}
+
+const softTermsNormalized = CONFIG.softWords.map(normalizeForMatch).filter(Boolean);
+const softSet = new Set(softTermsNormalized);
+
+const hardWords = CONFIG.bannedWords.filter(raw => {
+  const cleaned = normalizeForMatch(raw);
+  return cleaned && !softSet.has(cleaned);
+});
+
+const HARD_INDEX = buildFilter(hardWords);
+const SOFT_INDEX = buildFilter(CONFIG.softWords);
+
+// ==================== MODERATION CLASSIFIER ====================
+function collectCandidates(normalizedText, maxWindow) {
+  const tokens = normalizedText ? normalizedText.split(' ').filter(Boolean) : [];
+  const candidates = new Set();
+
+  for (const token of tokens) {
+    candidates.add(token);
+  }
+
+  for (let size = 2; size <= maxWindow; size++) {
+    for (let i = 0; i + size <= tokens.length; i++) {
+      candidates.add(tokens.slice(i, i + size).join(' '));
+    }
+  }
+
+  const compact = tokens.join('');
+  if (compact) candidates.add(compact);
+
+  return [...candidates];
+}
+
+function classifyModeration(text) {
+  const normalized = normalizeForMatch(text);
+  if (!normalized) return { hardHits: [], softHits: [] };
+
+  const candidates = collectCandidates(
+    normalized,
+    Math.max(HARD_INDEX.maxWords, SOFT_INDEX.maxWords)
+  );
+
+  const hardHits = [];
+  const softHits = [];
+
+  for (const candidate of candidates) {
+    if (HARD_INDEX.filter.contains(candidate)) {
+      hardHits.push(candidate);
+      continue;
+    }
+
+    if (SOFT_INDEX.filter.contains(candidate)) {
+      softHits.push(candidate);
+    }
+  }
+
+  return {
+    hardHits: [...new Set(hardHits)],
+    softHits: [...new Set(softHits)]
+  };
+}
+
+const containsProfanity = (text) => classifyModeration(text).hardHits.length > 0;
 
 // ==================== UTIL: STRIP COLOUR CODES ====================
 function stripColorCodes(str) {
   return str.replace(/§[0-9a-fk-or]/g, '');
 }
-
-// ==================== LEVENSHTEIN DISTANCE ====================
-function levenshtein(a, b) {
-  const m = [];
-  for (let i = 0; i <= b.length; i++) m[i] = [i];
-  for (let j = 0; j <= a.length; j++) m[0][j] = j;
-  for (let i = 1; i <= b.length; i++) {
-    for (let j = 1; j <= a.length; j++) {
-      m[i][j] = b[i - 1] === a[j - 1]
-        ? m[i - 1][j - 1]
-        : Math.min(m[i - 1][j - 1] + 1, m[i][j - 1] + 1, m[i - 1][j] + 1);
-    }
-  }
-  return m[b.length][a.length];
-}
-
-// ==================== 7‑LAYER CLEANING PIPELINE ====================
-// 1. Unicode Scrub
-function unicodeScrub(str) {
-  let normalized = str.normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
-  normalized = normalized.replace(/[\u200B-\u200D\uFEFF]/g, '');
-  return normalized;
-}
-
-// 2. Leet‑Swap
-const leetMap = new Map([
-  ['0','o'], ['1','i'], ['2','z'], ['3','e'], ['4','a'], ['5','s'], ['6','g'],
-  ['7','t'], ['8','b'], ['9','g'], ['@','a'], ['$','s'], ['!','i'], ['+','t'],
-  ['#','h'], ['(','c'], ['µ','u'], ['ß','b'], ['€','e'], ['¥','y']
-]);
-
-function leetSwap(str) {
-  return str.toLowerCase().split('').map(c => leetMap.get(c) || c).join('');
-}
-
-// 3. De‑Spacing
-function despacing(str) {
-  return str.replace(/[^a-z]/g, '');
-}
-
-// 4. Squeeze (collapse >2 repeats to exactly 2)
-function squeeze(str) {
-  return str.replace(/([a-z])\1{2,}/g, '$1$1');
-}
-
-// 5. Entropy Prune (remove keyboard smashes)
-function entropyPrune(str) {
-  const bigramRepeated = /(.{2})\1{2,}/g;
-  let cleaned = str.replace(bigramRepeated, '$1');
-  cleaned = cleaned.replace(/(.{2})\1{2,}/g, '$1');
-  if (cleaned.length > 10) cleaned = cleaned.slice(0, 8);
-  return cleaned;
-}
-
-// Full cleaning pipeline
-function fullClean(str) {
-  let out = unicodeScrub(str);
-  out = leetSwap(out);
-  out = despacing(out);
-  out = squeeze(out);
-  out = entropyPrune(out);
-  return out;
-}
-
-// ==================== PRE‑COMPUTE BANNED DATA ====================
-// Single‑word banned terms (cleaned)
-const singleBannedSet = new Set();
-// Multi‑word phrases (cleaned, for full‑text scanning)
-const multiBannedList = [];
-// Array of cleaned single banned words for fuzzy matching
-const singleBannedArray = [];
-
-for (const raw of CONFIG.bannedWords) {
-  const cleaned = fullClean(raw);
-  if (cleaned.length === 0) continue;
-  
-  if (raw.includes(' ')) {
-    multiBannedList.push(cleaned);
-  } else {
-    singleBannedSet.add(cleaned);
-    singleBannedArray.push(cleaned);
-  }
-}
-
-// ==================== SMART PROFANITY DETECTOR ====================
-function isProfane(text) {
-  // 1. Full‑text scan for multi‑word phrases
-  const fullCleanText = fullClean(text);
-  for (const phrase of multiBannedList) {
-    if (fullCleanText.includes(phrase)) {
-      return true;
-    }
-  }
-
-  // 2. Split into individual words (preserve only letters)
-  const words = text.toLowerCase().split(/[\s,.!?;:"'()\[\]{}<>\/\\|-]+/);
-  
-  for (const word of words) {
-    if (word.length === 0) continue;
-    
-    const cleanedWord = fullClean(word);
-    if (cleanedWord.length === 0) continue;
-    
-    // Exact match
-    if (singleBannedSet.has(cleanedWord)) {
-      return true;
-    }
-    
-    // Fuzzy match for short words (3-6 chars) to catch "shyt", "phuk", etc.
-    if (cleanedWord.length >= 3 && cleanedWord.length <= 6) {
-      for (const banned of singleBannedArray) {
-        // Only compare if lengths are within 2 of each other
-        if (Math.abs(cleanedWord.length - banned.length) > 2) continue;
-        
-        const dist = levenshtein(cleanedWord, banned);
-        // Threshold: distance 1 for lengths <=4, distance 2 for lengths 5-6
-        const threshold = (cleanedWord.length <= 4) ? 1 : 2;
-        if (dist <= threshold) {
-          return true;
-        }
-      }
-    }
-  }
-
-  return false;
-}
-
-const containsProfanity = isProfane;
 
 // ==================== SRV ====================
 async function resolveServer() {
@@ -219,28 +302,29 @@ async function resolveServer() {
   } catch (e) {
     dbg('SRV failed:', e.code);
   }
+
   const ip = await dns.lookup(CONFIG.server.host);
   log(`A → ${ip.address}`);
   return { host: CONFIG.server.host, port: CONFIG.server.port };
 }
 
 // ==================== PORT SCAN ====================
-function testPort(host,port){
-  return new Promise(res=>{
+function testPort(host, port) {
+  return new Promise(res => {
     const s = new net.Socket();
     s.setTimeout(3000);
-    s.on('connect',()=>{s.destroy();res(true)});
-    s.on('error',()=>res(false));
-    s.on('timeout',()=>res(false));
-    s.connect(port,host);
+    s.on('connect', () => { s.destroy(); res(true); });
+    s.on('error', () => res(false));
+    s.on('timeout', () => res(false));
+    s.connect(port, host);
   });
 }
 
-async function findPort(host,base){
-  if(!CONFIG.debug.probePorts) return base;
-  for(let p of [base,...CONFIG.debug.ports]){
+async function findPort(host, base) {
+  if (!CONFIG.debug.probePorts) return base;
+  for (const p of [base, ...CONFIG.debug.ports]) {
     dbg(`Testing ${host}:${p}`);
-    if(await testPort(host,p)){
+    if (await testPort(host, p)) {
       log(`OPEN PORT → ${p}`);
       return p;
     }
@@ -248,44 +332,31 @@ async function findPort(host,base){
   return base;
 }
 
-// ==================== CHAT AI ====================
-async function chatReply(sender,msg){
-  try{
-    const res = await chatGroq.chat.completions.create({
-      messages:[
-        {role:'system',content:'casual minecraft admin, short replies'},
-        {role:'user',content:`${sender}: ${msg}`}
-      ],
-      model: CONFIG.groq.chatModel,
-      max_tokens: 60
-    });
-    let reply = res.choices[0]?.message?.content?.trim();
-    if(!reply || reply.includes('[IGNORE]')) return;
-    bot.chat(reply);
-  }catch(e){ err('Chat API:',e.message); }
-}
-
 // ==================== SAY ====================
-function say(text){
-  if(!bot) return;
-  if(text.length <= CONFIG.chat.max_length){
+function say(text) {
+  if (!bot) return;
+
+  if (text.length <= CONFIG.chat.max_length) {
     bot.chat(text);
     return;
   }
+
   let remaining = text;
   let delay = 0;
-  while(remaining.length){
-    let chunk = remaining.slice(0,CONFIG.chat.max_length);
+
+  while (remaining.length) {
+    let chunk = remaining.slice(0, CONFIG.chat.max_length);
     const lastSpace = chunk.lastIndexOf(' ');
-    if(lastSpace > 100) chunk = chunk.slice(0,lastSpace);
-    setTimeout(()=>bot.chat(chunk),delay);
+    if (lastSpace > 100) chunk = chunk.slice(0, lastSpace);
+
+    setTimeout(() => bot.chat(chunk), delay);
     delay += 400;
     remaining = remaining.slice(chunk.length).trim();
   }
 }
 
 // ==================== BOT ====================
-async function createBot(){
+async function createBot() {
   loginSent = false;
   isReady = false;
   isLoggedIn = false;
@@ -293,7 +364,7 @@ async function createBot(){
 
   log('Resolving...');
   const resolved = await resolveServer();
-  const port = await findPort(resolved.host,resolved.port);
+  const port = await findPort(resolved.host, resolved.port);
 
   log(`CONNECT → ${resolved.host}:${port}`);
 
@@ -327,6 +398,7 @@ async function createBot(){
       isLoggedIn = true;
       loginSent = true;
       log('Login confirmed.');
+
       if (!autoSwitchDone && CONFIG.server.targetServer) {
         autoSwitchDone = true;
         setTimeout(() => {
@@ -336,30 +408,38 @@ async function createBot(){
           }
         }, 2000);
       }
+
       return;
     }
 
     const match = text.match(/^([^:]+?):\s(.+)$/);
     if (!match) return;
+
     const sender = match[1].trim();
     const message = match[2].trim();
+
     if (sender === CONFIG.server.username) return;
 
-    if (containsProfanity(message)) {
-      log(`PROFANITY → ${sender}: ${message}`);
+    const mod = classifyModeration(message);
+
+    if (mod.hardHits.length) {
+      log(`MUTE HIT → ${sender}: ${message} [${mod.hardHits.join(', ')}]`);
+
       const now = Date.now();
       const last = muteCooldown.get(sender) || 0;
+
       if (now - last < 2000) {
         log(`Mute cooldown active for ${sender}, skipping.`);
         return;
       }
+
       muteCooldown.set(sender, now);
-      say(`/tempmute ${sender} 10m Automod: Profanity detected`);
+      say(`/tempmute ${sender} 10m Automod: Cuckoo filter match`);
       return;
     }
 
-    if (message.toLowerCase().includes(CONFIG.server.username.toLowerCase())) {
-      chatReply(sender, message);
+    if (mod.softHits.length) {
+      log(`SOFT HIT → ${sender}: ${message} [${mod.softHits.join(', ')}]`);
     }
   });
 
