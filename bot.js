@@ -12,7 +12,7 @@ const err = (...a) => console.log('[ERROR]', ...a);
 
 // ==================== CONFIG ====================
 const CONFIG = {
-  engine: 'Polaris v4.5',
+  engine: 'Polaris v6.0 – Flawless Mod',
 
   server: {
     host: 'play.pcsmp.net',
@@ -36,31 +36,31 @@ const CONFIG = {
   },
 
   bannedWords: [
-  'fuck', 'fck', 'fuk', 'f**k', 'fucking', 'fucked', 'fucker', 'motherfucker', 'mofo', 'fukboi', 'fukboy', 'fudgepacker',
-  'shit', 'sh1t', 'sh!t', 's**t', 'shitty', 'bullshit', 'bullsh!t', 'dipshit',
-  'ass', 'asshole', 'arse', 'arsehole', 'jackass', 'dumbass', 'smartass', 'badass',
-  'bitch', 'b!tch', 'biatch', 'bitching', 'bitchy', 'sonofabitch',
-  'cunt', 'c**t',
-  'dick', 'd1ck', 'd!ck', 'cock', 'prick',
-  'pussy', 'pusy', 'pussies',
-  'bastard',
-  'douche', 'douchebag', 'douchecanoe',
-  'wanker', 'tosser',
-  'bugger',
-  'hell', 'bloody', 'bloody hell', 'damn', 'goddamn',
-  'piss', 'pissed', 'piss off',
-  'slut', 'whore',
-  'retard', 'retarded',
-  'nigger', 'nigga', 'n1gg3r', 'nigg3r', 'nig-nog', 'coon', 'spic', 'spik', 'kike', 'chink', 'chinky', 'gook', 'gooker', 'goy', 'goyim', 'honky', 'cracker', 'jap', 'paki', 'raghead', 'wop', 'guido', 'dago', 'beaner', 'wetback', 'zipperhead', 'heeb', 'kraut', 'yid', 'gypsy', 'gippo', 'half-breed', 'mulatto', 'oreo', 'uncle tom', 'darky', 'darkie', 'golliwog', 'golly', 'sambo', 'wog', 'boong', 'pikey', 'spade', 'jungle bunny', 'porch monkey', 'sand nigger', 'timber nigger',
-  'faggot', 'fag', 'faggy', 'dyke', 'dike', 'tranny', 'shemale', 'poof', 'poofter',
-  'spaz', 'spastic', 'cripple', 'midget', 'gimp', 'window licker',
-  'infidel', 'christ-killer', 'papist', 'kafir',
-  'hillbilly', 'redneck',
-  'rape', 'raper', 'rapist', 'molest', 'cunnilingus', 'fellatio', 'blowjob', 'bukkake', 'cuck', 'cuckold', 'circlejerk', 'handjob', 'rimjob', 'fisting', 'pegging', 'scat', 'watersports', 'anal', 'analingus', 'clit', 'clitoris', 'penis', 'vagina', 'vulva', 'labia', 'testicles', 'tits', 'titties', 'boobs', 'cum', 'jizz', 'semen', 'sperm', 'precum', 'orgasm', 'masturbate', 'wank', 'jerk off',
-  'kill yourself', 'kys', 'suicide', 'cut yourself', 'go die', 'hang yourself',
-  'pedo', 'pedophile', 'loli', 'lolicon', 'childporn', 'preteen', 'jailbait',
-  'nazi', 'hitler', 'heil hitler', '1488', 'swastika', 'kkk', 'klu klux klan', 'reich', 'fuhrer', 'aryan', 'white power'
-]
+    'fuck', 'fck', 'fuk', 'f**k', 'fucking', 'fucked', 'fucker', 'motherfucker', 'mofo', 'fukboi', 'fukboy', 'fudgepacker',
+    'shit', 'sh1t', 'sh!t', 's**t', 'shitty', 'bullshit', 'bullsh!t', 'dipshit',
+    'ass', 'asshole', 'arse', 'arsehole', 'jackass', 'dumbass', 'smartass', 'badass',
+    'bitch', 'b!tch', 'biatch', 'bitching', 'bitchy', 'sonofabitch',
+    'cunt', 'c**t',
+    'dick', 'd1ck', 'd!ck', 'cock', 'prick',
+    'pussy', 'pusy', 'pussies',
+    'bastard',
+    'douche', 'douchebag', 'douchecanoe',
+    'wanker', 'tosser',
+    'bugger',
+    'hell', 'bloody', 'bloody hell', 'damn', 'goddamn',
+    'piss', 'pissed', 'piss off',
+    'slut', 'whore',
+    'retard', 'retarded',
+    'nigger', 'nigga', 'n1gg3r', 'nigg3r', 'nig-nog', 'coon', 'spic', 'spik', 'kike', 'chink', 'chinky', 'gook', 'gooker', 'goy', 'goyim', 'honky', 'cracker', 'jap', 'paki', 'raghead', 'wop', 'guido', 'dago', 'beaner', 'wetback', 'zipperhead', 'heeb', 'kraut', 'yid', 'gypsy', 'gippo', 'half-breed', 'mulatto', 'oreo', 'uncle tom', 'darky', 'darkie', 'golliwog', 'golly', 'sambo', 'wog', 'boong', 'pikey', 'spade', 'jungle bunny', 'porch monkey', 'sand nigger', 'timber nigger',
+    'faggot', 'fag', 'faggy', 'dyke', 'dike', 'tranny', 'shemale', 'poof', 'poofter',
+    'spaz', 'spastic', 'cripple', 'midget', 'gimp', 'window licker',
+    'infidel', 'christ-killer', 'papist', 'kafir',
+    'hillbilly', 'redneck',
+    'rape', 'raper', 'rapist', 'molest', 'cunnilingus', 'fellatio', 'blowjob', 'bukkake', 'cuck', 'cuckold', 'circlejerk', 'handjob', 'rimjob', 'fisting', 'pegging', 'scat', 'watersports', 'anal', 'analingus', 'clit', 'clitoris', 'penis', 'vagina', 'vulva', 'labia', 'testicles', 'tits', 'titties', 'boobs', 'cum', 'jizz', 'semen', 'sperm', 'precum', 'orgasm', 'masturbate', 'wank', 'jerk off',
+    'kill yourself', 'kys', 'suicide', 'cut yourself', 'go die', 'hang yourself',
+    'pedo', 'pedophile', 'loli', 'lolicon', 'childporn', 'preteen', 'jailbait',
+    'nazi', 'hitler', 'heil hitler', '1488', 'swastika', 'kkk', 'klu klux klan', 'reich', 'fuhrer', 'aryan', 'white power'
+  ]
 };
 
 // ==================== GLOBAL ====================
@@ -93,7 +93,7 @@ function levenshtein(a, b) {
   return m[b.length][a.length];
 }
 
-// ==================== 7‑LAYER PROFANITY FILTER ====================
+// ==================== 7‑LAYER CLEANING PIPELINE ====================
 // 1. Unicode Scrub
 function unicodeScrub(str) {
   let normalized = str.normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
@@ -117,12 +117,12 @@ function despacing(str) {
   return str.replace(/[^a-z]/g, '');
 }
 
-// 4. Squeeze
+// 4. Squeeze (collapse >2 repeats to exactly 2)
 function squeeze(str) {
   return str.replace(/([a-z])\1{2,}/g, '$1$1');
 }
 
-// 5. Entropy Prune
+// 5. Entropy Prune (remove keyboard smashes)
 function entropyPrune(str) {
   const bigramRepeated = /(.{2})\1{2,}/g;
   let cleaned = str.replace(bigramRepeated, '$1');
@@ -131,83 +131,79 @@ function entropyPrune(str) {
   return cleaned;
 }
 
-// 6. Sound‑Match (Double Metaphone – simplified)
-function doubleMetaphone(word) {
-  word = word.toLowerCase().replace(/[^a-z]/g, '');
-  if (word.length === 0) return '';
-
-  const rules = [
-    [/^kn/, 'n'], [/^gn/, 'n'], [/^pn/, 'n'], [/^ae/, 'e'], [/^wr/, 'r'],
-    [/^wh/, 'w'], [/^x/, 's'], [/^c(?=[iey])/, 's'], [/^c/, 'k'],
-    [/^g(?=[iey])/, 'j'], [/^g/, 'k'], [/^d(?=[gj])/, 'j'], [/^ph/, 'f'],
-    [/^qu/, 'k'], [/^s(?=[h])/, 's'], [/^t(?=[ia])/, 'x'], [/^v/, 'f'],
-    [/^w(?=[aeiou])/, 'w'], [/^y/, 'j'], [/^z/, 's'],
-    [/sch/g, 'sk'], [/tch/g, 'ch'], [/ck/g, 'k'], [/gh$/, 'f'],
-    [/ght/g, 't'], [/dg/g, 'j'], [/ph/g, 'f'], [/sh/g, 'x'],
-    [/th/g, '0'], [/ch/g, 'x'], [/c(?=[iey])/g, 's'], [/c/g, 'k'],
-    [/g(?=[iey])/g, 'j'], [/g/g, 'k'], [/s(?=[h])/g, 's'],
-    [/t(?=[ia])/g, 'x'], [/d(?=[gj])/g, 'j'], [/ng/g, 'nk'],
-    [/y/g, 'j'], [/z/g, 's'], [/v/g, 'f'], [/w/g, 'w'],
-    [/([b-df-hj-np-tv-xz])\1+/g, '$1'],
-    [/[aeiou]/g, '']
-  ];
-
-  let result = word;
-  for (const [pattern, replacement] of rules) {
-    result = result.replace(pattern, replacement);
-  }
-  return result.slice(0, 4);
+// Full cleaning pipeline
+function fullClean(str) {
+  let out = unicodeScrub(str);
+  out = leetSwap(out);
+  out = despacing(out);
+  out = squeeze(out);
+  out = entropyPrune(out);
+  return out;
 }
 
-// Pre‑compute phonetic codes for banned words
-const bannedPhonetics = new Set(
-  CONFIG.bannedWords.map(w => {
-    let processed = unicodeScrub(w);
-    processed = leetSwap(processed);
-    processed = despacing(processed);
-    processed = squeeze(processed);
-    processed = entropyPrune(processed);
-    return doubleMetaphone(processed);
-  })
-);
+// ==================== PRE‑COMPUTE BANNED DATA ====================
+// Single‑word banned terms (cleaned)
+const singleBannedSet = new Set();
+// Multi‑word phrases (cleaned, for full‑text scanning)
+const multiBannedList = [];
+// Array of cleaned single banned words for fuzzy matching
+const singleBannedArray = [];
 
-// Normalized banned words (for exact matching)
-const normalizedBanned = CONFIG.bannedWords.map(w => {
-  let n = unicodeScrub(w);
-  n = leetSwap(n);
-  n = despacing(n);
-  return n;
-});
+for (const raw of CONFIG.bannedWords) {
+  const cleaned = fullClean(raw);
+  if (cleaned.length === 0) continue;
+  
+  if (raw.includes(' ')) {
+    multiBannedList.push(cleaned);
+  } else {
+    singleBannedSet.add(cleaned);
+    singleBannedArray.push(cleaned);
+  }
+}
 
-// 7. Statistical Arbiter – algorithmic, NO SAFE LIST
-// 7. Statistical Arbiter – algorithmic, NO SAFE LIST
+// ==================== SMART PROFANITY DETECTOR ====================
 function isProfane(text) {
-  // Layers 1-5: clean the text
-  let processed = unicodeScrub(text);
-  processed = leetSwap(processed);
-  processed = despacing(processed);
-  processed = squeeze(processed);
-  processed = entropyPrune(processed);
-
-  if (processed.length === 0) return false;
-
-  // Direct substring match against every banned word (normalized)
-  for (const banned of CONFIG.bannedWords) {
-    // Normalize banned word the same way
-    let normBanned = unicodeScrub(banned);
-    normBanned = leetSwap(normBanned);
-    normBanned = despacing(normBanned);
-    normBanned = squeeze(normBanned);
-    normBanned = entropyPrune(normBanned);
-
-    // If the processed text contains the normalized banned word, it's profane
-    if (processed.includes(normBanned)) {
+  // 1. Full‑text scan for multi‑word phrases
+  const fullCleanText = fullClean(text);
+  for (const phrase of multiBannedList) {
+    if (fullCleanText.includes(phrase)) {
       return true;
+    }
+  }
+
+  // 2. Split into individual words (preserve only letters)
+  const words = text.toLowerCase().split(/[\s,.!?;:"'()\[\]{}<>\/\\|-]+/);
+  
+  for (const word of words) {
+    if (word.length === 0) continue;
+    
+    const cleanedWord = fullClean(word);
+    if (cleanedWord.length === 0) continue;
+    
+    // Exact match
+    if (singleBannedSet.has(cleanedWord)) {
+      return true;
+    }
+    
+    // Fuzzy match for short words (3-6 chars) to catch "shyt", "phuk", etc.
+    if (cleanedWord.length >= 3 && cleanedWord.length <= 6) {
+      for (const banned of singleBannedArray) {
+        // Only compare if lengths are within 2 of each other
+        if (Math.abs(cleanedWord.length - banned.length) > 2) continue;
+        
+        const dist = levenshtein(cleanedWord, banned);
+        // Threshold: distance 1 for lengths <=4, distance 2 for lengths 5-6
+        const threshold = (cleanedWord.length <= 4) ? 1 : 2;
+        if (dist <= threshold) {
+          return true;
+        }
+      }
     }
   }
 
   return false;
 }
+
 const containsProfanity = isProfane;
 
 // ==================== SRV ====================
