@@ -1,104 +1,79 @@
 /**
- * FIREBASE REALTIME DATABASE - ZERO SDK TESTER
- * Uses standard HTTP REST logic.
+ * FIREBASE REST TESTER - PERSISTENT VERSION
+ * No SDKs. No Deletions. Just pure HTTP.
  */
 
 const firebaseConfig = {
   databaseURL: "https://polaris-358ae-default-rtdb.firebaseio.com",
 };
 
-// We append .json to the end of every path. That is the "secret sauce".
-const DB_PATH = "debug_test_node";
+// We'll write to this node. It will stay there until you manually delete it.
+const DB_PATH = "persistent_debug_node";
 const FULL_URL = `${firebaseConfig.databaseURL}/${DB_PATH}.json`;
 
 async function runTests() {
-  console.log("🚀 Starting Firebase REST API Debug Session...");
+  console.log("🚀 Starting Persistent Firebase Write...");
   console.log(`📡 Target URL: ${FULL_URL}\n`);
 
-  // --- TEST 1: WRITE (PUT) ---
-  // PUT overwrites the entire node at that path.
   try {
-    console.log("--- [TEST 1] Writing Data (PUT) ---");
-    const payload = {
-      status: "online",
-      message: "Hello from Node.js vanilla fetch!",
-      timestamp: new Date().toISOString()
+    // --- STEP 1: INITIAL WRITE (PUT) ---
+    console.log("--- [STEP 1] Writing Initial Data ---");
+    const initialPayload = {
+      status: "initialized",
+      message: "This data should stay in the console!",
+      last_updated: new Date().toLocaleString(),
+      connection_type: "Pure REST (Fetch)"
     };
 
-    console.log("DEBUG: Sending Payload:", JSON.stringify(payload));
-    
-    const response = await fetch(FULL_URL, {
+    const writeRes = await fetch(FULL_URL, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(initialPayload)
     });
 
-    await handleResponse(response);
-  } catch (err) {
-    console.error("❌ Critical Error in Test 1:", err.message);
-  }
+    await handleResponse(writeRes, "Initial Write");
 
-  // --- TEST 2: UPDATE (PATCH) ---
-  // PATCH only changes the specific fields you send.
-  try {
-    console.log("\n--- [TEST 2] Updating Data (PATCH) ---");
-    const updatePayload = { status: "testing_complete" };
+    // --- STEP 2: PARTIAL UPDATE (PATCH) ---
+    console.log("\n--- [STEP 2] Updating Status (PATCH) ---");
+    const updatePayload = { 
+      status: "successfully_persisted",
+      note: "I added this field without deleting the others!"
+    };
     
-    const response = await fetch(FULL_URL, {
+    const updateRes = await fetch(FULL_URL, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(updatePayload)
     });
 
-    await handleResponse(response);
-  } catch (err) {
-    console.error("❌ Critical Error in Test 2:", err.message);
-  }
+    await handleResponse(updateRes, "Partial Update");
 
-  // --- TEST 3: READ (GET) ---
-  try {
-    console.log("\n--- [TEST 3] Reading Data (GET) ---");
-    const response = await fetch(FULL_URL);
-    await handleResponse(response);
-  } catch (err) {
-    console.error("❌ Critical Error in Test 3:", err.message);
-  }
+    // --- STEP 3: FINAL VERIFICATION (GET) ---
+    console.log("\n--- [STEP 3] Final Read-Back ---");
+    const readRes = await fetch(FULL_URL);
+    await handleResponse(readRes, "Verification Read");
 
-  // --- TEST 4: DELETE ---
-  try {
-    console.log("\n--- [TEST 4] Deleting Test Node (DELETE) ---");
-    const response = await fetch(FULL_URL, { method: 'DELETE' });
-    
-    if (response.ok) {
-      console.log("✅ Success: Node deleted successfully.");
-    } else {
-      await handleResponse(response);
-    }
-  } catch (err) {
-    console.error("❌ Critical Error in Test 4:", err.message);
-  }
+    console.log("\n✅ DONE! You can now check your Firebase Console.");
+    console.log(`🔗 Look for the "${DB_PATH}" key at: ${firebaseConfig.databaseURL}`);
 
-  console.log("\n🏁 Debug Session Finished.");
+  } catch (err) {
+    console.error("\n❌ SCRIPT ERROR:", err.message);
+  }
 }
 
 /**
- * Helper to log detailed response info
+ * Enhanced Debug Logger
  */
-async function handleResponse(res) {
-  console.log(`DEBUG: Status: ${res.status} ${res.statusText}`);
-  
+async function handleResponse(res, label) {
   const data = await res.json();
   
   if (res.ok) {
-    console.log("✅ Server Response Data:", data);
+    console.log(`[${label}] Status: ${res.status} OK`);
+    console.log(`[${label}] Data:`, JSON.stringify(data, null, 2));
   } else {
-    console.log("❌ Request Failed!");
-    console.log("DEBUG: Error Detail:", data);
-    
-    if (res.status === 401 || res.status === 403) {
-      console.warn("\n⚠️  PERMISSION DENIED: Check your Firebase Realtime Database Security Rules.");
-      console.warn("If you haven't added Auth, your rules must be set to '.read': true, '.write': true.");
-    }
+    console.log(`[${label}] ❌ FAILED!`);
+    console.log(`[${label}] Error Status: ${res.status}`);
+    console.log(`[${label}] Error Body:`, data);
   }
 }
 
