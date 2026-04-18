@@ -652,7 +652,7 @@ async function createBot() {
   });
   
   bot.on('end', () => {
-    log('Reconnect in 10s...');
+    log('Reconnect in 1s...');
     isReady = false;
     updateFirebaseStatus().catch(() => {});
     stopCommandPolling();
