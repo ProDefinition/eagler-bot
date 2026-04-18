@@ -656,7 +656,7 @@ async function createBot() {
     isReady = false;
     updateFirebaseStatus().catch(() => {});
     stopCommandPolling();
-    setTimeout(createBot, 10000);
+    setTimeout(createBot, 1000);
   });
 }
 
