@@ -70,7 +70,7 @@ const CONFIG = {
     'rape', 'raper', 'rapist', 'molest', 'cunnilingus', 'fellatio', 'blowjob', 'bukkake', 'cuck', 'cuckold', 'circlejerk', 'handjob', 'rimjob', 'fisting', 'pegging', 'scat', 'watersports', 'anal', 'analingus', 'clit', 'clitoris', 'penis', 'vagina', 'vulva', 'labia', 'testicles', 'tits', 'titties', 'boobs', 'cum', 'jizz', 'semen', 'sperm', 'precum', 'orgasm', 'masturbate', 'wank', 'jerk off',
     'kill yourself', 'kys', 'suicide', 'cut yourself', 'go die', 'hang yourself',
     'pedo', 'pedophile', 'loli', 'lolicon', 'childporn', 'preteen', 'jailbait',
-    'nazi', 'hitler', 'heil hitler', '1488', 'swastika', 'kkk', 'klu klux klan', 'reich', 'fuhrer', 'aryan', 'white power'
+    'nazi', 'hitler', 'heil hitler', '1488', 'swastika', 'klu klux klan', 'reich', 'fuhrer', 'aryan', 'white power'
   ]
 };
 
