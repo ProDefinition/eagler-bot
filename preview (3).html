@@ -1,0 +1,781 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Polaris Management</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    :root {
+      --bg: #F9F8F6;
+      --card: #FFFFFF;
+      --card-2: #FCFBF9;
+      --text: #3A322B;
+      --muted: #8C7E72;
+      --border: #EBE6E0;
+      --accent: #6D5A4C;
+      --accent-hover: #57473A;
+      --accent-soft: #F2ECE4;
+      --danger: #9C4B4B;
+      --danger-soft: #F7EBEB;
+      --success: #4A7256;
+      --success-soft: #EAF2ED;
+      --shadow: 0 8px 24px rgba(58, 50, 43, 0.06);
+      --selection: #EAE1D5;
+    }
+
+    html[data-theme="dark"] {
+      --bg: #121110;
+      --card: #1A1816;
+      --card-2: #171513;
+      --text: #F5EEE8;
+      --muted: #A89C92;
+      --border: #2D2925;
+      --accent: #D0B6A1;
+      --accent-hover: #E2CCB7;
+      --accent-soft: #26211C;
+      --danger: #E08D8D;
+      --danger-soft: #2A1D1D;
+      --success: #7BB08A;
+      --success-soft: #1D2A21;
+      --shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+      --selection: #4E4037;
+    }
+
+    html, body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, sans-serif;
+    }
+
+    body {
+      min-height: 100vh;
+    }
+
+    ::selection {
+      background: var(--selection);
+    }
+
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow);
+    }
+
+    .card-soft {
+      background: var(--card-2);
+      border: 1px solid var(--border);
+    }
+
+    .text-accent { color: var(--accent); }
+    .text-muted { color: var(--muted); }
+    .text-danger { color: var(--danger); }
+    .text-success { color: var(--success); }
+
+    .bg-accent { background: var(--accent); }
+    .bg-accent-soft { background: var(--accent-soft); }
+    .bg-danger-soft { background: var(--danger-soft); }
+    .bg-success-soft { background: var(--success-soft); }
+
+    .border-theme { border-color: var(--border); }
+
+    .glass {
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+    }
+
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body class="selection:bg-[var(--selection)]">
+  <div id="app" class="min-h-screen w-full flex items-center justify-center p-4 sm:p-6 lg:p-8"></div>
+
+  <script>
+    const DB_URL = 'https://polaris-358ae-default-rtdb.firebaseio.com';
+
+    const state = {
+      user: null,
+      status: null,
+      messages: [],
+      staffList: {},
+      auditLogs: [],
+      intervals: [],
+      view: 'auth',
+      authError: '',
+      theme: localStorage.getItem('polaris_theme') || 'light'
+    };
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function normalizeUsernameKey(username) {
+      return String(username || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]/g, '_');
+    }
+
+    function applyTheme(theme) {
+      state.theme = theme === 'dark' ? 'dark' : 'light';
+      document.documentElement.setAttribute('data-theme', state.theme);
+      localStorage.setItem('polaris_theme', state.theme);
+      refreshIcons();
+    }
+
+    function toggleTheme() {
+      applyTheme(state.theme === 'dark' ? 'light' : 'dark');
+      if (state.view === 'auth') renderAuth();
+      if (state.view === 'dashboard') renderDashboard();
+      if (state.view === 'admin') renderAdminModal();
+    }
+
+    async function hashPassword(message) {
+      const msgBuffer = new TextEncoder().encode(message);
+      const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    function refreshIcons() {
+      setTimeout(() => {
+        if (window.lucide && lucide.createIcons) lucide.createIcons();
+      }, 0);
+    }
+
+    function clearPolling() {
+      state.intervals.forEach(clearInterval);
+      state.intervals = [];
+    }
+
+    function themeToggleButton(extraClass = '') {
+      const icon = state.theme === 'dark' ? 'sun' : 'moon';
+      const label = state.theme === 'dark' ? 'Light mode' : 'Dark mode';
+      return `
+        <button onclick="toggleTheme()" class="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-theme bg-[var(--card)] hover:bg-[var(--card-2)] transition-colors ${extraClass}" title="${label}">
+          <i data-lucide="${icon}" class="w-4 h-4 text-accent"></i>
+          <span class="text-sm font-medium">${label}</span>
+        </button>
+      `;
+    }
+
+    async function fetchJson(path) {
+      const res = await fetch(`${DB_URL}/${path}.json`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`Request failed: ${path}`);
+      return await res.json();
+    }
+
+    async function writeJson(path, method, body) {
+      const res = await fetch(`${DB_URL}/${path}.json`, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`${method} ${path} failed: ${text}`);
+      }
+      return await res.json().catch(() => null);
+    }
+
+    async function appendJson(path, body) {
+      return await writeJson(path, 'POST', body);
+    }
+
+    async function logAudit(action, details = {}) {
+      if (!state.user) return;
+      try {
+        await appendJson('audit', {
+          timestamp: Date.now(),
+          username: state.user.username,
+          action,
+          details: JSON.stringify(details),
+        });
+      } catch (e) {
+        console.error('Audit log failed', e);
+      }
+    }
+
+    async function fetchStatus() {
+      try {
+        const data = await fetchJson('status');
+        state.status = data || null;
+        renderDashboard();
+      } catch (e) {
+        console.error('Status fail', e);
+      }
+    }
+
+    async function fetchChat() {
+      try {
+        const data = await fetchJson('chat');
+        if (!data) {
+          state.messages = [];
+        } else {
+          state.messages = Object.values(data)
+            .filter(Boolean)
+            .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
+            .slice(-100);
+        }
+        renderChat();
+      } catch (e) {
+        console.error('Chat fail', e);
+      }
+    }
+
+    async function sendCommand(payload, actionName = 'Command') {
+      if (state.user?.banned) {
+        alert('Your account has been suspended.');
+        return;
+      }
+
+      try {
+        await appendJson('commands', {
+          ...payload,
+          timestamp: Date.now(),
+          issuedBy: state.user.username
+        });
+
+        await logAudit(actionName, payload);
+      } catch (e) {
+        console.error('Command fail', e);
+        alert('Command failed to send.');
+      }
+    }
+
+    async function handleAuth(type) {
+      const userEl = document.getElementById('auth-username');
+      const passEl = document.getElementById('auth-password');
+      const username = userEl?.value?.trim() || '';
+      const password = passEl?.value || '';
+
+      if (!username || !password) {
+        state.authError = 'Please enter both fields.';
+        renderAuth();
+        return;
+      }
+
+      const usernameKey = normalizeUsernameKey(username);
+      const hashedPass = await hashPassword(password);
+
+      try {
+        const res = await fetch(`${DB_URL}/staff/${usernameKey}.json`);
+        const userData = await res.json();
+
+        if (type === 'login') {
+          if (!userData) {
+            state.authError = 'User not found. Try registering.';
+          } else if (userData.password !== hashedPass) {
+            state.authError = 'Incorrect password.';
+          } else if (userData.banned) {
+            state.authError = 'Your account has been banned by an administrator.';
+          } else {
+            loginSuccess(username, userData.role);
+            return;
+          }
+        } else if (type === 'register') {
+          if (userData) {
+            state.authError = 'Username already exists.';
+          } else {
+            const role = usernameKey === 'chewkok' ? 'admin' : 'staff';
+            await writeJson(`staff/${usernameKey}`, 'PUT', {
+              password: hashedPass,
+              role: role,
+              banned: false,
+              created: Date.now(),
+              displayName: username
+            });
+            loginSuccess(username, role);
+            return;
+          }
+        }
+
+        renderAuth();
+      } catch (e) {
+        state.authError = 'Connection error.';
+        renderAuth();
+      }
+    }
+
+    function loginSuccess(username, role) {
+      if (normalizeUsernameKey(username) === 'chewkok') role = 'admin';
+      state.user = { username, role };
+      localStorage.setItem('polaris_user', JSON.stringify(state.user));
+      state.authError = '';
+      state.view = 'dashboard';
+      initDashboard();
+    }
+
+    function logout() {
+      clearPolling();
+      state.user = null;
+      localStorage.removeItem('polaris_user');
+      state.view = 'auth';
+      state.status = null;
+      state.messages = [];
+      state.staffList = {};
+      state.auditLogs = [];
+      renderAuth();
+    }
+
+    async function loadAdminData() {
+      try {
+        const [staffData, auditData] = await Promise.all([
+          fetchJson('staff').catch(() => ({})),
+          fetchJson('audit').catch(() => ({}))
+        ]);
+
+        state.staffList = staffData || {};
+        state.auditLogs = auditData
+          ? Object.values(auditData).filter(Boolean).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)).slice(0, 50)
+          : [];
+
+        renderAdminModal();
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    async function toggleBan(usernameKey, currentStatus) {
+      if (usernameKey === 'chewkok') {
+        alert('Cannot ban the Superadmin.');
+        return;
+      }
+
+      try {
+        await writeJson(`staff/${usernameKey}/banned`, 'PUT', !currentStatus);
+        await logAudit('Toggle Ban', { target: usernameKey, banned: !currentStatus });
+        await loadAdminData();
+      } catch (e) {
+        console.error(e);
+        alert('Failed to update ban status.');
+      }
+    }
+
+    async function clearChatDb() {
+      if (!confirm('Clear database chat history? This cannot be undone.')) return;
+
+      try {
+        await writeJson('chat', 'DELETE', null);
+        await appendJson('chat', {
+          type: 'system',
+          message: 'Chat cleared by admin.',
+          timestamp: Date.now(),
+          sender: 'system'
+        });
+        await logAudit('Clear Chat', {});
+        state.messages = [];
+        renderChat();
+      } catch (e) {
+        console.error(e);
+        alert('Failed to clear chat.');
+      }
+    }
+
+    async function init() {
+      applyTheme(state.theme);
+
+      const savedUser = localStorage.getItem('polaris_user');
+      if (savedUser) {
+        state.user = JSON.parse(savedUser);
+
+        try {
+          const key = normalizeUsernameKey(state.user.username);
+          const liveUser = await fetchJson(`staff/${key}`).catch(() => null);
+
+          if (!liveUser || liveUser.banned) {
+            logout();
+            return;
+          }
+
+          state.user.role = liveUser.role || state.user.role || 'staff';
+          localStorage.setItem('polaris_user', JSON.stringify(state.user));
+          initDashboard();
+        } catch (e) {
+          console.error(e);
+          logout();
+        }
+      } else {
+        renderAuth();
+      }
+    }
+
+    function initDashboard() {
+      clearPolling();
+      state.view = 'dashboard';
+      renderDashboard();
+      fetchStatus();
+      fetchChat();
+      state.intervals.push(setInterval(fetchStatus, 2000));
+      state.intervals.push(setInterval(fetchChat, 2000));
+    }
+
+    function renderAuth() {
+      const app = document.getElementById('app');
+      app.innerHTML = `
+        <div class="card w-full max-w-md rounded-2xl p-6 sm:p-8">
+          <div class="flex items-center justify-between gap-3 mb-6">
+            <div class="flex items-center gap-3">
+              <i data-lucide="terminal" class="w-8 h-8 text-accent"></i>
+              <h1 class="text-3xl font-semibold tracking-tight">Polaris</h1>
+            </div>
+            ${themeToggleButton('shrink-0')}
+          </div>
+
+          <p class="text-center text-muted text-sm mb-8">Staff Authentication</p>
+
+          ${state.authError ? `<div class="bg-danger-soft text-danger p-3 rounded-lg text-sm mb-4 border border-theme">${escapeHtml(state.authError)}</div>` : ''}
+
+          <div class="space-y-4">
+            <div>
+              <label class="block text-xs font-semibold text-muted uppercase tracking-wide mb-1">Username</label>
+              <input type="text" id="auth-username" class="w-full bg-[var(--bg)] border border-theme rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/25" placeholder="e.g. ChewKok" autocomplete="username">
+            </div>
+            <div>
+              <label class="block text-xs font-semibold text-muted uppercase tracking-wide mb-1">Password</label>
+              <input type="password" id="auth-password" class="w-full bg-[var(--bg)] border border-theme rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/25" autocomplete="current-password">
+            </div>
+            <div class="flex flex-col sm:flex-row gap-3 pt-2">
+              <button onclick="handleAuth('login')" class="flex-1 bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white py-3 rounded-xl font-medium transition-colors">Login</button>
+              <button onclick="handleAuth('register')" class="flex-1 bg-accent-soft hover:opacity-90 text-[var(--accent)] py-3 rounded-xl font-medium transition-colors border border-theme">Register</button>
+            </div>
+          </div>
+        </div>
+      `;
+      refreshIcons();
+    }
+
+    function renderDashboard() {
+      if (state.view !== 'dashboard') return;
+
+      const app = document.getElementById('app');
+      const isOnline = !!state.status?.online;
+      const isAdmin = state.user?.role === 'admin';
+
+      if (!document.getElementById('dashboard-layout')) {
+        app.innerHTML = `
+          <div id="dashboard-layout" class="w-full max-w-7xl grid grid-cols-1 lg:grid-cols-12 gap-6 h-auto lg:h-[calc(100vh-4rem)]">
+            <div class="lg:col-span-4 flex flex-col gap-6 h-auto lg:h-full min-h-0">
+              <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 px-1">
+                <div>
+                  <h1 class="text-3xl font-semibold tracking-tight text-[var(--text)] flex items-center gap-3">
+                    <i data-lucide="terminal" class="w-7 h-7 text-accent"></i> Polaris
+                  </h1>
+                </div>
+                <div class="flex items-center justify-between sm:justify-end gap-3">
+                  ${themeToggleButton()}
+                  <div class="text-right">
+                    <p class="text-sm font-semibold">${escapeHtml(state.user.username)}</p>
+                    <p class="text-[10px] uppercase tracking-wider ${isAdmin ? 'text-danger' : 'text-muted'} font-bold">${escapeHtml(state.user.role)}</p>
+                  </div>
+                  <button onclick="logout()" class="p-2 rounded-lg bg-[var(--card)] border border-theme hover:bg-[var(--card-2)] transition-colors" title="Logout">
+                    <i data-lucide="log-out" class="w-4 h-4 text-muted"></i>
+                  </button>
+                </div>
+              </div>
+
+              ${isAdmin ? `
+                <button onclick="state.view='admin'; loadAdminData();" class="flex items-center justify-between w-full bg-[var(--text)] hover:opacity-95 text-[var(--bg)] p-4 rounded-2xl shadow-sm transition-colors group">
+                  <div class="flex items-center gap-3">
+                    <i data-lucide="shield-check" class="w-5 h-5 text-[var(--accent-soft)]"></i>
+                    <div class="text-left">
+                      <p class="font-medium text-sm">Superadmin Access</p>
+                      <p class="text-xs opacity-70">Manage staff & view logs</p>
+                    </div>
+                  </div>
+                  <i data-lucide="chevron-right" class="w-4 h-4 opacity-50 group-hover:opacity-100 transition-opacity"></i>
+                </button>
+              ` : ''}
+
+              <div class="card rounded-2xl p-6">
+                <div class="flex justify-between items-start mb-6">
+                  <h2 class="text-lg font-medium">System Status</h2>
+                  <span id="status-badge" class="px-3 py-1 rounded-full text-xs font-medium flex items-center gap-1.5 bg-danger-soft text-danger border border-theme">
+                    <span class="w-1.5 h-1.5 rounded-full bg-current"></span> Offline
+                  </span>
+                </div>
+                <div class="space-y-4">
+                  <div class="flex items-center gap-3">
+                    <div class="p-2 rounded-lg bg-accent-soft text-accent"><i data-lucide="server" class="w-4 h-4"></i></div>
+                    <div>
+                      <p class="text-[10px] text-muted font-semibold uppercase tracking-wider">Server</p>
+                      <p id="status-server" class="font-medium text-sm">Loading...</p>
+                    </div>
+                  </div>
+                  <div class="flex items-center gap-3">
+                    <div class="p-2 rounded-lg bg-accent-soft text-accent"><i data-lucide="activity" class="w-4 h-4"></i></div>
+                    <div>
+                      <p class="text-[10px] text-muted font-semibold uppercase tracking-wider">Bot Username</p>
+                      <p id="status-username" class="font-medium text-sm">Loading...</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="card rounded-2xl p-6 flex-1 flex flex-col min-h-0">
+                <h2 class="text-lg font-medium mb-4">Quick Actions</h2>
+                <div class="grid grid-cols-1 gap-3">
+                  <button onclick="sendCommand({ type: 'toggleModeration', enabled: !state.status?.moderationEnabled }, 'Toggle Moderation')" class="flex items-center gap-3 p-3 rounded-xl border border-theme hover:bg-[var(--card-2)] transition-colors text-left group">
+                    <i id="icon-mod" data-lucide="shield" class="w-5 h-5 text-muted"></i>
+                    <div>
+                      <p class="font-medium text-sm">Auto-Moderation</p>
+                      <p id="status-mod" class="text-xs text-muted">Checking...</p>
+                    </div>
+                  </button>
+                  <button onclick="sendCommand({ type: 'shutdown' }, 'Shutdown Bot')" class="flex items-center gap-3 p-3 rounded-xl border border-theme hover:bg-danger-soft transition-colors text-left">
+                    <i data-lucide="power" class="w-5 h-5 text-danger"></i>
+                    <div>
+                      <p class="font-medium text-sm text-danger">Shutdown Bot</p>
+                    </div>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="lg:col-span-8 card rounded-2xl flex flex-col min-h-[72vh] lg:min-h-0 overflow-hidden">
+              <div class="px-4 sm:px-6 py-4 border-b border-theme flex justify-between items-center bg-[var(--card-2)]">
+                <div class="flex items-center gap-2">
+                  <i data-lucide="message-square" class="w-5 h-5 text-accent"></i>
+                  <h2 class="font-medium">Live Feed</h2>
+                </div>
+                ${isAdmin ? `
+                  <button onclick="clearChatDb()" class="text-xs flex items-center gap-1.5 text-muted hover:text-danger transition-colors">
+                    <i data-lucide="trash-2" class="w-3.5 h-3.5"></i> Clear Chat
+                  </button>
+                ` : ''}
+              </div>
+
+              <div id="chat-container" class="flex-1 overflow-y-auto p-4 sm:p-6 space-y-3 bg-[var(--card-2)] min-h-0"></div>
+
+              <div class="p-3 sm:p-4 bg-[var(--card)] border-t border-theme">
+                <form id="chat-form" onsubmit="event.preventDefault(); submitChat();" class="relative">
+                  <input type="text" id="chat-input" placeholder="Send message or /command..." class="w-full bg-[var(--bg)] border border-theme rounded-xl py-3 pl-4 pr-12 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/25">
+                  <button type="submit" class="absolute right-2 top-2 bottom-2 aspect-square flex items-center justify-center rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white transition-colors">
+                    <i data-lucide="send" class="w-4 h-4 ml-0.5"></i>
+                  </button>
+                </form>
+              </div>
+            </div>
+          </div>
+        `;
+        refreshIcons();
+      }
+
+      const statusServer = document.getElementById('status-server');
+      const statusUsername = document.getElementById('status-username');
+      const badge = document.getElementById('status-badge');
+      const modText = document.getElementById('status-mod');
+      const modIcon = document.getElementById('icon-mod');
+
+      if (statusServer) statusServer.innerText = state.status?.server || 'Unknown';
+      if (statusUsername) statusUsername.innerText = state.status?.username || 'Unknown';
+
+      if (badge) {
+        if (isOnline) {
+          badge.className = 'px-3 py-1 rounded-full text-xs font-medium flex items-center gap-1.5 bg-success-soft text-success border border-theme';
+          badge.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-current"></span> Online';
+        } else {
+          badge.className = 'px-3 py-1 rounded-full text-xs font-medium flex items-center gap-1.5 bg-danger-soft text-danger border border-theme';
+          badge.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-current"></span> Offline';
+        }
+      }
+
+      if (modText && modIcon) {
+        if (state.status?.moderationEnabled) {
+          modText.innerText = 'Active (Cuckoo ON)';
+          modIcon.className = 'w-5 h-5 text-success';
+        } else {
+          modText.innerText = 'Disabled';
+          modIcon.className = 'w-5 h-5 text-muted';
+        }
+      }
+    }
+
+    function renderChat() {
+      if (state.view !== 'dashboard') return;
+      const container = document.getElementById('chat-container');
+      if (!container) return;
+
+      const botName = state.status?.username || 'Habibi';
+
+      if (state.messages.length === 0) {
+        container.innerHTML = `
+          <div class="h-full flex flex-col items-center justify-center text-muted space-y-3">
+            <i data-lucide="message-square" class="w-8 h-8 opacity-20"></i>
+            <p class="text-sm">No messages.</p>
+          </div>
+        `;
+        refreshIcons();
+        return;
+      }
+
+      const isAtBottom = container.scrollHeight - container.scrollTop <= container.clientHeight + 50;
+
+      container.innerHTML = state.messages.map(msg => {
+        const time = new Date(msg.timestamp || Date.now()).toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit'
+        });
+
+        if (msg.type === 'system') {
+          return `
+            <div class="flex items-baseline gap-2">
+              <span class="text-[10px] text-muted font-mono w-16 flex-shrink-0">${escapeHtml(time)}</span>
+              <span class="text-sm text-muted italic flex items-center gap-1.5">
+                <i data-lucide="shield-alert" class="w-3.5 h-3.5 opacity-60"></i>
+                ${escapeHtml(msg.message || '')}
+              </span>
+            </div>
+          `;
+        }
+
+        const senderName = (msg.sender === state.status?.username || msg.type === 'bot')
+          ? botName
+          : (msg.sender || 'Habibi');
+
+        const messageText = escapeHtml(msg.message || '');
+
+        return `
+          <div class="flex items-baseline gap-2">
+            <span class="text-[10px] text-muted font-mono w-16 flex-shrink-0">${escapeHtml(time)}</span>
+            <div class="text-sm text-[var(--text)] break-words">
+              <strong class="font-semibold mr-2 text-accent">${escapeHtml(senderName)}</strong>${messageText}
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      refreshIcons();
+      if (isAtBottom) container.scrollTop = container.scrollHeight;
+    }
+
+    async function submitChat() {
+      const inputEl = document.getElementById('chat-input');
+      const text = inputEl?.value?.trim() || '';
+      if (!text) return;
+
+      inputEl.value = '';
+
+      try {
+        await appendJson('commands', {
+          type: 'chat',
+          text,
+          timestamp: Date.now(),
+          origin: 'dashboard',
+          issuedBy: state.user.username
+        });
+      } catch (e) {
+        console.error('Chat command failed', e);
+        alert('Message failed to send.');
+      }
+    }
+
+    function renderAdminModal() {
+      const app = document.getElementById('app');
+      app.innerHTML = `
+        <div class="w-full max-w-5xl card rounded-2xl overflow-hidden flex flex-col h-auto lg:h-[calc(100vh-4rem)]">
+          <div class="bg-[var(--text)] text-[var(--bg)] px-4 sm:px-6 py-4 flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4">
+            <div class="flex items-center gap-3">
+              <i data-lucide="shield-check" class="w-6 h-6 text-[var(--accent-soft)]"></i>
+              <div>
+                <h2 class="font-medium text-lg tracking-wide">Superadmin Console</h2>
+                <p class="text-xs opacity-70">Logged in as ${escapeHtml(state.user.username)}</p>
+              </div>
+            </div>
+            <div class="flex items-center gap-3">
+              ${themeToggleButton('text-[var(--text)] bg-[var(--bg)] border-[var(--border)]')}
+              <button onclick="initDashboard()" class="text-[var(--bg)] hover:opacity-95 flex items-center gap-2 text-sm bg-white/10 px-3 py-2 rounded-lg transition-colors border border-white/10">
+                <i data-lucide="arrow-left" class="w-4 h-4"></i> Back
+              </button>
+            </div>
+          </div>
+
+          <div class="flex flex-col lg:flex-row flex-1 overflow-hidden min-h-0">
+            <div class="w-full lg:w-1/3 border-b lg:border-b-0 lg:border-r border-theme bg-[var(--card-2)] flex flex-col min-h-0">
+              <div class="p-4 border-b border-theme">
+                <h3 class="font-medium text-sm text-muted uppercase tracking-wider flex items-center gap-2">
+                  <i data-lucide="users" class="w-4 h-4"></i> Staff Roster
+                </h3>
+              </div>
+              <div class="flex-1 overflow-y-auto p-2 space-y-2 min-h-0">
+                ${Object.keys(state.staffList || {}).length === 0 ? `
+                  <div class="p-4 text-sm text-muted">No staff accounts found.</div>
+                ` : Object.keys(state.staffList).map(key => {
+                  const staff = state.staffList[key] || {};
+                  const isBanned = !!staff.banned;
+                  const isSuperAdmin = staff.role === 'admin';
+
+                  return `
+                    <div class="bg-[var(--card)] border ${isBanned ? 'border-red-300/40' : 'border-theme'} p-3 rounded-xl flex justify-between items-center shadow-sm gap-3">
+                      <div class="min-w-0">
+                        <p class="font-semibold text-sm ${isBanned ? 'text-danger line-through' : 'text-[var(--text)]'} truncate">${escapeHtml(key)}</p>
+                        <p class="text-xs text-muted uppercase">${escapeHtml(staff.role || 'staff')}</p>
+                      </div>
+                      ${!isSuperAdmin ? `
+                        <button onclick="toggleBan('${escapeHtml(key)}', ${isBanned})" class="text-xs px-3 py-1.5 rounded-lg font-medium transition-colors shrink-0 ${isBanned ? 'bg-success-soft text-success hover:opacity-90' : 'bg-danger-soft text-danger hover:opacity-90'}">
+                          ${isBanned ? 'Unban' : 'Suspend'}
+                        </button>
+                      ` : '<span class="text-[10px] bg-[var(--text)] text-[var(--bg)] px-2 py-1 rounded">ROOT</span>'}
+                    </div>
+                  `;
+                }).join('')}
+              </div>
+            </div>
+
+            <div class="w-full lg:w-2/3 flex flex-col bg-[var(--card)] min-h-0">
+              <div class="p-4 border-b border-theme">
+                <h3 class="font-medium text-sm text-muted uppercase tracking-wider flex items-center gap-2">
+                  <i data-lucide="history" class="w-4 h-4"></i> Activity Audit Log
+                </h3>
+              </div>
+              <div class="flex-1 overflow-y-auto p-4 space-y-4 min-h-0">
+                ${state.auditLogs.length === 0 ? '<p class="text-sm text-muted italic">No activity logs found.</p>' : ''}
+                ${state.auditLogs.map(log => `
+                  <div class="flex gap-4 items-start border-b border-theme pb-4 last:border-0">
+                    <div class="text-[10px] text-muted font-mono mt-1 w-20 flex-shrink-0">
+                      ${escapeHtml(new Date(log.timestamp || Date.now()).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }))}
+                    </div>
+                    <div class="min-w-0">
+                      <p class="text-sm text-[var(--text)]">
+                        <strong class="text-accent">${escapeHtml(log.username || 'Unknown')}</strong>
+                        performed
+                        <strong class="uppercase text-xs tracking-wider bg-accent-soft px-1.5 py-0.5 rounded ml-1">${escapeHtml(log.action || 'Action')}</strong>
+                      </p>
+                      <p class="text-xs text-muted mt-1 font-mono bg-[var(--bg)] p-2 rounded border border-theme break-words">${escapeHtml(log.details || '')}</p>
+                    </div>
+                  </div>
+                `).join('')}
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+      refreshIcons();
+    }
+
+    window.handleAuth = handleAuth;
+    window.logout = logout;
+    window.sendCommand = sendCommand;
+    window.clearChatDb = clearChatDb;
+    window.toggleBan = toggleBan;
+    window.loadAdminData = loadAdminData;
+    window.initDashboard = initDashboard;
+    window.submitChat = submitChat;
+    window.toggleTheme = toggleTheme;
+
+    init();
+  </script>
+</body>
+</html>
